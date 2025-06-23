@@ -43,7 +43,7 @@ cd trading-assistant
 docker-compose up --build
 ```
 
-The application will be available at `http://localhost:3838`
+The application will be available at `http://localhost:8001`
 
 ### Option 2: Local R Installation
 
@@ -89,7 +89,7 @@ docker-compose up -d
 docker-compose down
 ```
 
-The application will be available at `http://localhost:3838`
+The application will be available at `http://localhost:8001`
 
 #### Manual Docker Build
 
