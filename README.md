@@ -36,8 +36,8 @@ A modern, interactive Shiny web application for comprehensive stock analysis usi
 
 ```bash
 # Clone the repository
-git clone <repository-url>
-cd trading-assistant
+git clone https://github.com/lab1702/trading-app
+cd trading-app
 
 # Start with Docker Compose
 docker-compose up --build
@@ -343,8 +343,8 @@ options(
 
 ### Development Setup
 ```bash
-git clone <repository-url>
-cd trading-assistant
+git clone https://github.com/lab1702/trading-app
+cd trading-app
 R -e "install.packages(c('shiny', 'devtools', 'testthat'))"
 ```
 
@@ -393,4 +393,4 @@ Built with ❤️ for the R and quantitative finance communities.
 
 **Happy Trading! 📈📊🚀**
 
-For questions, issues, or contributions, please visit the [project repository](https://github.com/your-username/trading-assistant).
+For questions, issues, or contributions, please visit the [project repository](https://github.com/lab1702/trading-app).
