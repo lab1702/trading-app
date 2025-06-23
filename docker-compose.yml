@@ -2,5 +2,5 @@ services:
   trading-app:
     build: .
     ports:
-      - "3838:3838"
+      - "8001:3838"
     restart: unless-stopped
