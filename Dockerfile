@@ -1,5 +1,7 @@
 FROM rocker/shiny-verse
 
+RUN usr/local/lib/R/site-library/littler/examples/update.r
+
 RUN install2.r \
     --error \
     --skipinstalled \
