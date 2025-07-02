@@ -42,6 +42,7 @@ stock_syms <- tryCatch(
 
 ui <- page_navbar(
   useBusyIndicators(),
+  theme = bs_theme(preset = "bootstrap"),
   title = "lab1702's Trading Assistant",
   sidebar = sidebar(
     card(
