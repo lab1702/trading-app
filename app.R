@@ -39,6 +39,8 @@ stock_syms <- tryCatch(
   }
 )
 
+# Configure thematic for automatic ggplot2 theming
+thematic_on(font = font_spec(scale = 1.5))
 
 ui <- page_navbar(
   useBusyIndicators(),
@@ -205,7 +207,10 @@ ui <- page_navbar(
 
 
 server <- function(input, output, session) {
-  thematic_on(font = font_spec(scale = 1.5))
+  # Debounce stock input to prevent excessive API calls while typing
+  stock_debounced <- reactive({
+    input$stock
+  }) |> debounce(1000)  # 1 second delay
 
   # Helper function to categorize and format error messages
   get_error_message <- function(context, level = NULL, error_obj = NULL) {
@@ -289,9 +294,9 @@ server <- function(input, output, session) {
   }
 
   get_stocks_data <- reactive({
-    req(nchar(toupper(trimws(input$stock))) > 0)
+    req(nchar(toupper(trimws(stock_debounced()))) > 0)
 
-    symbol <- toupper(trimws(input$stock))
+    symbol <- toupper(trimws(stock_debounced()))
 
     # Basic symbol validation
     if (!grepl("^[A-Z0-9.-]+$", symbol) || nchar(symbol) > CONFIG$SYMBOL_MAX_LENGTH) {
@@ -309,7 +314,7 @@ server <- function(input, output, session) {
   get_raw_data <- reactive({
     req(d <- get_stocks_data())
 
-    list(data = d, ticker = toupper(trimws(input$stock)))
+    list(data = d, ticker = toupper(trimws(stock_debounced())))
   })
 
   get_company_name <- reactive({
@@ -353,13 +358,13 @@ server <- function(input, output, session) {
         return(NULL)
       }
     )
-  }) |> bindCache(input$stock)
+  }) |> bindCache(stock_debounced())
 
   get_ichimoku <- reactive({
     req(x <- get_raw_data())
 
     ichimoku(x = x$data, ticker = x$ticker)
-  }) |> bindCache(input$stock)
+  }) |> bindCache(stock_debounced())
 
   # Factory function for creating strategy reactives
   create_strategy <- function(level) {
@@ -384,7 +389,7 @@ server <- function(input, output, session) {
           return(NULL)
         }
       )
-    }) |> bindCache(input$stock, level)
+    }) |> bindCache(stock_debounced(), level)
   }
 
   # Factory function for getting best strategy
@@ -457,25 +462,25 @@ server <- function(input, output, session) {
       geom_ribbon(aes(ymin = BB_lower, ymax = BB_upper),
         alpha = 0.1, fill = "blue"
       ) +
-      geom_line(aes(y = BB_upper), color = "blue", alpha = 0.6, size = 0.5) +
-      geom_line(aes(y = BB_lower), color = "blue", alpha = 0.6, size = 0.5) +
-      geom_line(aes(y = BB_mavg), color = "blue", alpha = 0.8, size = 0.7) +
+      geom_line(aes(y = BB_upper), color = "blue", alpha = 0.6, linewidth = 0.5) +
+      geom_line(aes(y = BB_lower), color = "blue", alpha = 0.6, linewidth = 0.5) +
+      geom_line(aes(y = BB_mavg), color = "blue", alpha = 0.8, linewidth = 0.7) +
 
       # Candlesticks - wicks
       geom_segment(aes(x = Date, xend = Date, y = Low, yend = High),
         color = ifelse(df$direction == "up", up_color, down_color),
-        size = 0.5
+        linewidth = 0.5
       ) +
 
       # Candlesticks - bodies
       geom_segment(aes(x = Date, xend = Date, y = Open, yend = Close),
         color = ifelse(df$direction == "up", up_color, down_color),
-        size = 2
+        linewidth = 2
       ) +
 
       # Moving averages
-      geom_line(aes(y = SMA20), color = "orange", size = 0.8, alpha = 0.8) +
-      geom_line(aes(y = SMA50), color = "purple", size = 0.8, alpha = 0.8) +
+      geom_line(aes(y = SMA20), color = "orange", linewidth = 0.8, alpha = 0.8) +
+      geom_line(aes(y = SMA50), color = "purple", linewidth = 0.8, alpha = 0.8) +
       labs(
         title = paste(ticker, "- Candlestick Chart with Technical Indicators"),
         y = "Price ($)"
@@ -487,7 +492,7 @@ server <- function(input, output, session) {
         text = element_text(color = text_color, size = 14),
         axis.text = element_text(color = text_color, size = 12),
         axis.title = element_text(color = text_color, size = 14),
-        panel.grid = element_line(color = grid_color, size = 0.3),
+        panel.grid = element_line(color = grid_color, linewidth = 0.3),
         plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
         axis.title.x = element_blank()
       )
@@ -506,13 +511,13 @@ server <- function(input, output, session) {
         text = element_text(color = text_color, size = 12),
         axis.text = element_text(color = text_color, size = 11),
         axis.title = element_text(color = text_color, size = 13),
-        panel.grid = element_line(color = grid_color, size = 0.3),
+        panel.grid = element_line(color = grid_color, linewidth = 0.3),
         axis.title.x = element_blank()
       )
 
     # RSI subplot
     p3 <- ggplot(df, aes(x = Date)) +
-      geom_line(aes(y = RSI), color = "cyan", size = 0.8) +
+      geom_line(aes(y = RSI), color = "cyan", linewidth = 0.8) +
       geom_hline(yintercept = 70, color = "red", linetype = "dashed", alpha = 0.7) +
       geom_hline(yintercept = 30, color = "green", linetype = "dashed", alpha = 0.7) +
       geom_hline(yintercept = 50, color = text_color, linetype = "dotted", alpha = 0.5) +
@@ -525,14 +530,14 @@ server <- function(input, output, session) {
         text = element_text(color = text_color, size = 12),
         axis.text = element_text(color = text_color, size = 11),
         axis.title = element_text(color = text_color, size = 13),
-        panel.grid = element_line(color = grid_color, size = 0.3),
+        panel.grid = element_line(color = grid_color, linewidth = 0.3),
         axis.title.x = element_blank()
       )
 
     # MACD subplot
     p4 <- ggplot(df, aes(x = Date)) +
-      geom_line(aes(y = MACD), color = "blue", size = 0.8) +
-      geom_line(aes(y = MACD_signal), color = "red", size = 0.8) +
+      geom_line(aes(y = MACD), color = "blue", linewidth = 0.8) +
+      geom_line(aes(y = MACD_signal), color = "red", linewidth = 0.8) +
       geom_hline(yintercept = 0, color = text_color, linetype = "dotted", alpha = 0.5) +
       labs(y = "MACD", x = "Date") +
       theme_minimal() +
@@ -542,7 +547,7 @@ server <- function(input, output, session) {
         text = element_text(color = text_color, size = 12),
         axis.text = element_text(color = text_color, size = 11),
         axis.title = element_text(color = text_color, size = 13),
-        panel.grid = element_line(color = grid_color, size = 0.3)
+        panel.grid = element_line(color = grid_color, linewidth = 0.3)
       )
 
     # Combine plots
