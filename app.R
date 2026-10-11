@@ -353,7 +353,9 @@ server <- function(input, output, session) {
     key <- prophet_key()
     wanted_prophet_key <<- key
     req(!prophet_cache$exists(key))
-    req(!identical(isolate(prophet_task_key()), key) || isolate(prophet_task$status()) == "error")
+    # The task status isn't key-specific: a fit for this key that was skipped while
+    # queued also ends as "success", so restart whenever this key isn't in flight
+    req(!identical(isolate(prophet_task_key()), key) || isolate(prophet_task$status()) != "running")
 
     x <- get_raw_data()
     prophet_task_key(key)
@@ -649,12 +651,21 @@ server <- function(input, output, session) {
     renderPlot({
       d <- best_strategy[[level]]()
 
+      # Built from the parts of charts.PerformanceSummary(), whose ggplot2 engine
+      # ignores the title
       tryCatch(
-        charts.PerformanceSummary(
-          d[, c("sret", "ret")],
-          main = paste("L", level, "Performance", attributes(d)$ticker),
-          plot.engine = "ggplot2"
-        ),
+        {
+          r <- d[, c("sret", "ret")]
+          p_cum <- chart.CumReturns(
+            r,
+            main = "Cumulative Return", ylab = "Cumulative Return",
+            legend.loc = "topleft", plot.engine = "ggplot2"
+          )
+          p_dd <- chart.Drawdown(r, main = "Drawdown", ylab = "Drawdown", plot.engine = "ggplot2")
+
+          print(p_cum / p_dd +
+            plot_annotation(title = paste("L", level, "Performance", attributes(d)$ticker)))
+        },
         error = function(e) {
           log_error(paste0("performance L", level, " ", symbol()), e)
           plot_message(paste0("Performance chart L", level, " unavailable"))

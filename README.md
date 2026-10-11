@@ -199,7 +199,7 @@ create_candlestick_chart()       # Main chart visualization
 
 #### **Performance Charts Tab**
 - **Strategy Performance**: Cumulative returns of the strategy vs. buy-and-hold
-- **Period Returns and Drawdown**: Daily returns and drawdown from peak
+- **Drawdown**: Decline of the strategy and buy-and-hold from their previous peaks
 
 #### **Strategy Details Tab**
 - **Summary Statistics**: Detailed strategy performance metrics
