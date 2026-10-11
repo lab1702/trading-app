@@ -314,7 +314,14 @@ server <- function(input, output, session) {
   # Prophet fits run as an ExtendedTask in a background worker, so neither other
   # sessions nor this session's inputs wait on them. Only successful fits are
   # cached, so a transient failure is retried on the next visit to the tab.
+  # ExtendedTask queues calls made while a fit is running, so a queued fit for a
+  # symbol the user has since moved past (or one already cached) is skipped.
+  wanted_prophet_key <- NULL
   prophet_task <- ExtendedTask$new(function(d, periods, ticker, key) {
+    if (!identical(wanted_prophet_key, key) || prophet_cache$exists(key)) {
+      return(promise_resolve(NULL))
+    }
+
     future_promise(
       {
         m0 <- prophet::prophet(df = d, weekly.seasonality = FALSE, daily.seasonality = FALSE)
@@ -344,6 +351,7 @@ server <- function(input, output, session) {
   observe({
     req(input$nav == "Prophet Forecast")
     key <- prophet_key()
+    wanted_prophet_key <<- key
     req(!prophet_cache$exists(key))
     req(!identical(isolate(prophet_task_key()), key) || isolate(prophet_task$status()) == "error")
 
@@ -407,17 +415,22 @@ server <- function(input, output, session) {
     offset2 <- (p2 - 1L) * ("chikou" %in% s2)
     s2cond <- as.numeric(c(rep(NA, offset2), (core[, s2[1]] > core[, s2[2]])[seq_len(nrow(core) - offset2)]))
 
-    # One step of strat()'s entry/exit loop: s1 entry when the s1 position turns on,
-    # s2 exit when the s2 position turns on (positions lag conditions by one bar)
-    step <- function(prev, t) {
-      entry <- isTRUE(cond[t - 1] == 1 && cond[t - 2] == 0)
-      exit <- isTRUE(s2cond[t - 1] == 1 && s2cond[t - 2] == 0)
-      if (prev == 1) as.numeric(!exit) else as.numeric(entry)
+    # Whether a signal position (one bar after its condition) turns on at bar t.
+    # Like strat(), a position that is already on at its first defined bar counts.
+    turns_on <- function(v, t) {
+      isTRUE(v[t - 1] == 1) && (t < 3 || is.na(v[t - 2]) || v[t - 2] == 0)
     }
 
-    first <- max(which(!is.na(cond))[1], which(!is.na(s2cond))[1])
+    # One step of strat()'s entry/exit loop: s1 entry when the s1 position turns on,
+    # s2 exit when the s2 position turns on
+    step <- function(prev, t) {
+      if (prev == 1) as.numeric(!turns_on(s2cond, t)) else as.numeric(turns_on(cond, t))
+    }
+
+    # strat() defines the position wherever the s1 position is defined
+    first <- which(!is.na(cond))[1]
     held <- 0
-    for (t in seq(first + 2, end + 1)) {
+    for (t in seq(first + 1, end + 1)) {
       held <- step(held, t)
       posn[t] <- held
     }

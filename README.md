@@ -167,6 +167,8 @@ CONFIG <- list(
   SYMBOL_MAX_LENGTH = 10,
   STRATEGY_LEVELS = c(1, 2, 3),
   STRATEGY_N = 1,
+  MIN_ICHIMOKU_ROWS = 78,
+  MARKET_TZ = "America/New_York",
   PROPHET_WORKERS = 2
 )
 
@@ -269,6 +271,8 @@ CONFIG <- list(
   SYMBOL_MAX_LENGTH = 15,             # Allow longer symbols
   STRATEGY_LEVELS = c(1, 2, 3),
   STRATEGY_N = 1,
+  MIN_ICHIMOKU_ROWS = 78,             # Minimum daily bars for Ichimoku analysis
+  MARKET_TZ = "America/New_York",     # Timezone that decides when today's bar is complete
   PROPHET_WORKERS = 2                 # Background processes for Prophet fits
 )
 ```
