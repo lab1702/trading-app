@@ -27,8 +27,11 @@ CONFIG <- list(
   STRATEGY_LEVELS = c(1, 2, 3),
   STRATEGY_N = 1,
   # ichimoku() can segfault on shorter series, and autostrat() fails on every level
-  # below 52 + 2 * 26 + 2 periods (the cloud plus comparisons with the lagged chikou)
-  MIN_ICHIMOKU_ROWS = 106,
+  # below 52 + 2 * 26 periods (the cloud plus comparisons with the lagged chikou)
+  MIN_ICHIMOKU_ROWS = 104,
+  # Below this, autostrat() may find no combination with any trades (most often for
+  # level 3, which needs both an entry and an exit), so a failure means short history
+  MIN_RELIABLE_STRATEGY_ROWS = 130,
   # Bars dated on or after today in this timezone are still forming and are dropped
   MARKET_TZ = "America/New_York",
   PROPHET_WORKERS = 2
@@ -458,7 +461,14 @@ server <- function(input, output, session) {
           NULL
         }
       )
-      validate(need(length(s) > 0, paste0("Strategy L", level, " unavailable for ", symbol())))
+      validate(need(
+        length(s) > 0,
+        if (nrow(get_raw_data()$data) < CONFIG$MIN_RELIABLE_STRATEGY_ROWS) {
+          paste0("Not enough price history for the L", level, " strategy of ", symbol())
+        } else {
+          paste0("Strategy L", level, " unavailable for ", symbol())
+        }
+      ))
       s[[1]]
     }) |> bindCache(data_key(), level)
   }
