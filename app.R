@@ -26,8 +26,9 @@ CONFIG <- list(
   SYMBOL_MAX_LENGTH = 10,
   STRATEGY_LEVELS = c(1, 2, 3),
   STRATEGY_N = 1,
-  # ichimoku() can segfault on shorter series; 52 + 26 periods covers the cloud
-  MIN_ICHIMOKU_ROWS = 78,
+  # ichimoku() can segfault on shorter series, and autostrat() fails on every level
+  # below 52 + 2 * 26 + 2 periods (the cloud plus comparisons with the lagged chikou)
+  MIN_ICHIMOKU_ROWS = 106,
   # Bars dated on or after today in this timezone are still forming and are dropped
   MARKET_TZ = "America/New_York",
   PROPHET_WORKERS = 2

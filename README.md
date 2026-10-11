@@ -167,7 +167,7 @@ CONFIG <- list(
   SYMBOL_MAX_LENGTH = 10,
   STRATEGY_LEVELS = c(1, 2, 3),
   STRATEGY_N = 1,
-  MIN_ICHIMOKU_ROWS = 78,
+  MIN_ICHIMOKU_ROWS = 106,
   MARKET_TZ = "America/New_York",
   PROPHET_WORKERS = 2
 )
@@ -219,7 +219,7 @@ create_candlestick_chart()       # Main chart visualization
 ### Data Sources
 - **Stock Data**: Yahoo Finance via `quantmod` package, last 5 years, adjusted for splits and dividends
 - **Completed Bars Only**: today's still-forming bar (by New York date) is dropped, so signals don't flip intraday. A day's bar is used from the next calendar day
-- **Minimum History**: Ichimoku strategies need at least 78 daily bars; newer listings show a "not enough history" message
+- **Minimum History**: Ichimoku strategies need at least 106 daily bars; newer listings show a "not enough history" message
 - **Company Information**: NASDAQ symbol database
 - **Technical Indicators**: Calculated using `TTR` package
 
@@ -271,7 +271,7 @@ CONFIG <- list(
   SYMBOL_MAX_LENGTH = 15,             # Allow longer symbols
   STRATEGY_LEVELS = c(1, 2, 3),
   STRATEGY_N = 1,
-  MIN_ICHIMOKU_ROWS = 78,             # Minimum daily bars for Ichimoku analysis
+  MIN_ICHIMOKU_ROWS = 106,            # Minimum daily bars for Ichimoku analysis
   MARKET_TZ = "America/New_York",     # Timezone that decides when today's bar is complete
   PROPHET_WORKERS = 2                 # Background processes for Prophet fits
 )
