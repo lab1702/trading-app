@@ -5,7 +5,9 @@ services:
       - "8001:3838"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3838/"]
+      # Check that Shiny Server accepts connections without requesting the app, which
+      # would start (and soon idle-stop) an R process on every check
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3838"]
       interval: 30s
       timeout: 10s
       start_period: 60s

@@ -2,8 +2,8 @@
 
 A modern, interactive Shiny web application for comprehensive stock analysis using Ichimoku cloud strategies and Prophet forecasting.
 
-[![R](https://img.shields.io/badge/R-4.0%2B-blue.svg)](https://www.r-project.org/)
-[![Shiny](https://img.shields.io/badge/Shiny-1.7%2B-green.svg)](https://shiny.rstudio.com/)
+[![R](https://img.shields.io/badge/R-4.4%2B-blue.svg)](https://www.r-project.org/)
+[![Shiny](https://img.shields.io/badge/Shiny-1.8.1%2B-green.svg)](https://shiny.rstudio.com/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ## 🌟 Features
@@ -21,7 +21,7 @@ A modern, interactive Shiny web application for comprehensive stock analysis usi
 
 ### 🧠 AI-Powered Forecasting
 - **Prophet Time Series Model** for price predictions
-- **Decomposition Analysis** showing trend, seasonality, and holidays
+- **Decomposition Analysis** showing trend and yearly seasonality
 - **90-day Forward Projections** with confidence intervals
 
 ### 🎨 Modern UI/UX
@@ -71,7 +71,7 @@ shiny::runApp()
 # Method 2: Source the file
 source("app.R")
 
-# Method 3: Run in background
+# Method 3: Run on a fixed port
 shiny::runApp(launch.browser = TRUE, port = 3838)
 ```
 
@@ -142,7 +142,7 @@ a rebuild; if that happens, fix forward or temporarily pin the tag (e.g.
 `rocker/shiny-verse:4.6.1`) until it is resolved. Please don't flag the lack of
 pinning in code reviews.
 
-Docker Compose also defines a healthcheck, so `docker ps` reports the container as unhealthy if Shiny Server stops responding.
+Docker Compose also defines a healthcheck, so `docker ps` reports the container as unhealthy if Shiny Server stops accepting connections. It only opens a TCP connection to port 3838 rather than requesting the app, because each app request would start an R process that Shiny Server stops again once idle.
 
 ## 📚 Application Structure
 
@@ -204,8 +204,8 @@ create_candlestick_chart()       # Main chart visualization
 - **Outperformance Reports**: Probability analysis vs benchmark
 
 #### **Prophet Forecast Tab**
-- **Forecast**: 90-calendar-day price predictions (trading days only) with confidence bands
-- **Decomposition**: Trend, seasonal, and holiday components
+- **Forecast**: 90-calendar-day price predictions (only on weekdays the symbol trades) with confidence bands
+- **Decomposition**: Trend and yearly seasonality components
 
 ### 3. Dark Mode Toggle
 - Click the moon/sun icon in the top navigation
@@ -216,6 +216,8 @@ create_candlestick_chart()       # Main chart visualization
 
 ### Data Sources
 - **Stock Data**: Yahoo Finance via `quantmod` package, last 5 years, adjusted for splits and dividends
+- **Completed Bars Only**: today's still-forming bar (by New York date) is dropped, so signals don't flip intraday. A day's bar is used from the next calendar day
+- **Minimum History**: Ichimoku strategies need at least 78 daily bars; newer listings show a "not enough history" message
 - **Company Information**: NASDAQ symbol database
 - **Technical Indicators**: Calculated using `TTR` package
 
@@ -230,6 +232,10 @@ therefore vary by symbol.
 | L1 | Simple | s1 (one automatically selected condition) | Basic |
 | L2 | Complex | s1 & s2 (two conditions combined) | Intermediate |
 | L3 | Asymmetric | s1 × s2 (separate entry and exit conditions) | Advanced |
+
+The BUY / HOLD or SELL / WAIT recommendation is the position the strategy holds
+for the next bar. For L3 this follows the entry/exit logic (enter when s1 turns
+true, hold until s2 turns true), not just the current s1 condition.
 
 > **Note:** the best strategy is selected and evaluated on the same historical
 > data (in-sample), so reported performance is optimistic and will usually
@@ -246,7 +252,7 @@ therefore vary by symbol.
 ### Performance Features
 
 - **Reactive Caching**: Ichimoku, strategy, and Prophet results are cached across sessions, keyed on the downloaded data so they refresh when new prices arrive
-- **Background Forecasting**: Prophet models are fitted in background R processes (`future`), so a slow fit doesn't block other users
+- **Background Forecasting**: Prophet models are fitted in background R processes (`ExtendedTask` + `future`) only when the forecast tab is open, so a slow fit doesn't block other users or the rest of the app. Successful fits are cached; failed fits are retried the next time the tab is opened
 - **Debounced Input**: Typing a symbol waits 1 second before downloading or recomputing anything
 - **Error Handling**: Failures show a short message in the affected output; full error details are logged server-side
 
@@ -326,16 +332,8 @@ runApp()
 - The server makes outbound requests to Yahoo Finance (prices) and NASDAQ (symbol list) for public market data
 
 ### Production Deployment
-```r
-# Recommended security headers
-options(
-  shiny.sanitize.errors = TRUE,
-  shiny.trace = FALSE,
-  shiny.error = function() {
-    "An error occurred. Please try again."
-  }
-)
-```
+- The app shows its own short error messages and logs full error details to stderr (the Shiny Server log in Docker)
+- Shiny Server sanitizes any other error messages by default (`sanitize_errors` in `shiny-server.conf`); when running with `shiny::runApp()`, set `options(shiny.sanitize.errors = TRUE)`
 
 ## 📊 Performance Optimization
 
@@ -343,7 +341,6 @@ options(
 ```r
 # For production deployment
 options(
-  shiny.maxRequestSize = 30*1024^2,  # 30MB upload limit
   shiny.reactlog = FALSE,            # Disable in production
   repos = c(CRAN = "https://cran.rstudio.com/")
 )

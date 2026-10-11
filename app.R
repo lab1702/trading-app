@@ -16,7 +16,7 @@ library(promises)
 utils::globalVariables(c(
   "BB_lower", "BB_upper", "BB_mavg", "Low", "High", "Open", "Close",
   "Volume", "SMA20", "SMA50", "RSI", "MACD", "MACD_signal", "Date",
-  "cond", "index"
+  "posn", "index"
 ))
 
 # Configuration constants
@@ -26,8 +26,15 @@ CONFIG <- list(
   SYMBOL_MAX_LENGTH = 10,
   STRATEGY_LEVELS = c(1, 2, 3),
   STRATEGY_N = 1,
+  # ichimoku() can segfault on shorter series; 52 + 26 periods covers the cloud
+  MIN_ICHIMOKU_ROWS = 78,
+  # Bars dated on or after today in this timezone are still forming and are dropped
+  MARKET_TZ = "America/New_York",
   PROPHET_WORKERS = 2
 )
+
+# Completed Prophet fits, shared by all sessions in this R process
+prophet_cache <- cachem::cache_mem(max_size = 200 * 1024^2)
 
 # Prophet fits run in background R processes so one slow fit doesn't block
 # every other session sharing this R process
@@ -46,6 +53,7 @@ stock_syms <- tryCatch(
 thematic_on(font = font_spec(scale = 1.5))
 
 ui <- page_navbar(
+  id = "nav",
   header = useBusyIndicators(),
   theme = bs_theme(preset = "bootstrap"),
   title = "lab1702's Trading Assistant",
@@ -236,8 +244,15 @@ download_candles <- function(symbol) {
   validate(need(!is.null(d) || not_found, paste("Could not download data for", symbol, "- try again later")))
   validate(need(!is.null(d), paste("No data found for", symbol, "- check the spelling")))
 
+  # quantmod prefixes columns with the ticker (e.g. "LOW.Open"), which confuses
+  # ichimoku's name matching for tickers like LOW or HIGH
+  colnames(d) <- c("Open", "High", "Low", "Close", "Volume", "Adjusted")
+
   # Drop rows Yahoo returns without prices (volume may legitimately be missing)
   d <- d[complete.cases(d[, -5]), ]
+
+  # Drop today's still-forming bar so signals only use completed bars
+  d <- d[as.Date(index(d)) < as.Date(Sys.time(), tz = CONFIG$MARKET_TZ), ]
   validate(need(nrow(d) >= 2, paste("Not enough price history for", symbol)))
 
   # Adjust OHLC for splits and dividends so returns and signals aren't distorted
@@ -296,43 +311,118 @@ server <- function(input, output, session) {
     }
   })
 
-  get_prophet <- reactive({
-    x <- get_raw_data()
-
-    d <- data.frame(
-      ds = index(x$data),
-      y = as.numeric(Cl(x$data))
-    )
-    periods <- CONFIG$PROPHET_FORECAST_DAYS
-    ticker <- x$ticker
-
+  # Prophet fits run as an ExtendedTask in a background worker, so neither other
+  # sessions nor this session's inputs wait on them. Only successful fits are
+  # cached, so a transient failure is retried on the next visit to the tab.
+  prophet_task <- ExtendedTask$new(function(d, periods, ticker, key) {
     future_promise(
       {
         m0 <- prophet::prophet(df = d, weekly.seasonality = FALSE, daily.seasonality = FALSE)
         d0 <- prophet::make_future_dataframe(m = m0, periods = periods)
-        # Training data has no weekends, so don't forecast them either
-        d0 <- d0[as.POSIXlt(d0$ds)$wday %in% 1:5, , drop = FALSE]
+        # Only forecast weekdays the symbol actually trades on (no weekends for
+        # stocks, every day for crypto)
+        d0 <- d0[as.POSIXlt(d0$ds)$wday %in% unique(as.POSIXlt(d$ds)$wday), , drop = FALSE]
         f0 <- predict(m0, d0)
 
         list(ticker = ticker, model = m0, data = d0, forecast = f0)
       },
       seed = TRUE
-    )
-  }) |> bindCache(data_key())
+    ) |>
+      then(function(res) {
+        prophet_cache$set(key, res)
+        res
+      })
+  })
 
-  # Promise callbacks run outside the reactive context, so the symbol is passed in
-  forecast_failed <- function(sym) {
-    function(e) {
-      log_error(paste("prophet", sym), e)
-      validate(need(FALSE, paste("Forecast unavailable for", sym)))
+  prophet_key <- reactive({
+    rlang::hash(data_key())
+  })
+  prophet_task_key <- reactiveVal(NULL)
+
+  # Start a fit when the forecast tab is open and the result isn't cached. A key
+  # whose fit failed is retried the next time the tab is opened.
+  observe({
+    req(input$nav == "Prophet Forecast")
+    key <- prophet_key()
+    req(!prophet_cache$exists(key))
+    req(!identical(isolate(prophet_task_key()), key) || isolate(prophet_task$status()) == "error")
+
+    x <- get_raw_data()
+    prophet_task_key(key)
+    prophet_task$invoke(
+      d = data.frame(ds = index(x$data), y = as.numeric(Cl(x$data))),
+      periods = CONFIG$PROPHET_FORECAST_DAYS,
+      ticker = x$ticker,
+      key = key
+    )
+  })
+
+  get_prophet <- reactive({
+    key <- prophet_key()
+    status <- prophet_task$status()
+
+    res <- prophet_cache$get(key)
+    if (!cachem::is.key_missing(res)) {
+      return(res)
     }
-  }
+
+    if (status == "error" && identical(prophet_task_key(), key)) {
+      log_error(paste("prophet", symbol()), tryCatch(prophet_task$result(), error = identity))
+      validate(need(FALSE, paste("Forecast unavailable for", symbol())))
+    }
+    validate(need(FALSE, paste("Fitting forecast model for", symbol(), "...")))
+  })
 
   get_ichimoku <- reactive({
     x <- get_raw_data()
+    validate(need(
+      nrow(x$data) >= CONFIG$MIN_ICHIMOKU_ROWS,
+      paste("Not enough price history for Ichimoku analysis of", x$ticker)
+    ))
 
     ichimoku(x = x$data, ticker = x$ticker)
   }) |> bindCache(data_key())
+
+  # Positions held on each bar, ending with the next (not yet traded) bar, as a data
+  # frame of dates and positions. Follows ichimoku::strat(): positions are taken
+  # one bar after the signal. For asymmetric (level 3) strategies the entry
+  # condition alone isn't the position: once entered, the position is held until
+  # the exit condition (s2) turns true. strat()'s own posn column can't be used
+  # for this because it drops a trailing position that has no exit yet, so the
+  # entry/exit logic is replayed over the whole history.
+  replay_positions <- function(s) {
+    core <- coredata(s)
+    end <- max(which(!is.na(core[, "close"])))
+    cond <- as.numeric(core[, "cond"])
+    posn <- rep(NA_real_, end + 1)
+
+    rule <- strsplit(unlist(attr(s, "strat")["Strategy", 1]), " x ", fixed = TRUE)[[1]]
+    if (length(rule) == 1) {
+      posn[-1] <- cond[seq_len(end)]
+      return(data.frame(index = index(s)[seq_len(end + 1)], posn = posn))
+    }
+
+    s2 <- strsplit(rule[2], " > ", fixed = TRUE)[[1]]
+    p2 <- attr(s, "periods")[2L]
+    offset2 <- (p2 - 1L) * ("chikou" %in% s2)
+    s2cond <- as.numeric(c(rep(NA, offset2), (core[, s2[1]] > core[, s2[2]])[seq_len(nrow(core) - offset2)]))
+
+    # One step of strat()'s entry/exit loop: s1 entry when the s1 position turns on,
+    # s2 exit when the s2 position turns on (positions lag conditions by one bar)
+    step <- function(prev, t) {
+      entry <- isTRUE(cond[t - 1] == 1 && cond[t - 2] == 0)
+      exit <- isTRUE(s2cond[t - 1] == 1 && s2cond[t - 2] == 0)
+      if (prev == 1) as.numeric(!exit) else as.numeric(entry)
+    }
+
+    first <- max(which(!is.na(cond))[1], which(!is.na(s2cond))[1])
+    held <- 0
+    for (t in seq(first + 2, end + 1)) {
+      held <- step(held, t)
+      posn[t] <- held
+    }
+    data.frame(index = index(s)[seq_len(end + 1)], posn = posn)
+  }
 
   # Note: autostrat picks the best combination in-sample, on the same data it is
   # then evaluated on, so its results flatter the strategy
@@ -479,12 +569,10 @@ server <- function(input, output, session) {
   # Factory function for recommendation logic
   create_recommendation <- function(level) {
     renderText({
-      d <- best_strategy[[level]]()
-
-      last_condition <- tail(d$cond[!is.na(d$close)], 1)
-      if (length(last_condition) == 0 || is.na(last_condition)) {
+      position <- tail(replay_positions(best_strategy[[level]]())$posn, 1)
+      if (length(position) == 0 || is.na(position)) {
         "NO DATA"
-      } else if (as.numeric(last_condition) == 1) {
+      } else if (position == 1) {
         "BUY / HOLD"
       } else {
         "SELL / WAIT"
@@ -508,11 +596,12 @@ server <- function(input, output, session) {
     rownames = TRUE
   )
 
-  # Factory function for showcase plots
+  # Factory function for showcase plots of the position held (not the entry
+  # condition, which differs from the position for level 3)
   create_showcase_plot <- function(level) {
     renderPlot({
-      xts_df(best_strategy[[level]]()) |>
-        ggplot(aes(x = index, y = cond)) +
+      replay_positions(best_strategy[[level]]()) |>
+        ggplot(aes(x = index, y = posn)) +
         geom_line() +
         theme(
           axis.title = element_blank(),
@@ -568,7 +657,10 @@ server <- function(input, output, session) {
   # Factory function for strategy summaries
   create_summary <- function(level) {
     renderPrint({
-      summary(best_strategy[[level]]())
+      # Evaluate first: S4 dispatch in summary() would wrap a validation error
+      # in a generic error and show its raw text
+      s <- best_strategy[[level]]()
+      summary(s)
     })
   }
 
@@ -592,22 +684,18 @@ server <- function(input, output, session) {
   output$outperf3 <- create_outperformance(3)
 
   output$prophet <- renderPlot({
-    get_prophet() |>
-      then(function(d) {
-        plot(d$model, d$forecast) +
-          add_changepoints_to_plot(m = d$model)
-      }) |>
-      catch(forecast_failed(symbol()))
+    d <- get_prophet()
+
+    plot(d$model, d$forecast) +
+      add_changepoints_to_plot(m = d$model)
   })
 
   output$prophet_decomp <- renderPlot({
-    get_prophet() |>
-      then(function(d) {
-        # Draws directly; return NULL so renderPlot doesn't print the plot list again
-        prophet_plot_components(m = d$model, fcst = d$forecast)
-        NULL
-      }) |>
-      catch(forecast_failed(symbol()))
+    d <- get_prophet()
+
+    # Draws directly; return NULL so renderPlot doesn't print the plot list again
+    prophet_plot_components(m = d$model, fcst = d$forecast)
+    NULL
   })
 }
 
