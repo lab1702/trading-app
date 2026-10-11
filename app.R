@@ -9,6 +9,8 @@ library(ichimoku)
 library(prophet)
 library(TTR)
 library(patchwork)
+library(future)
+library(promises)
 
 # Suppress R CMD check notes for ggplot2 aesthetics
 utils::globalVariables(c(
@@ -19,16 +21,17 @@ utils::globalVariables(c(
 
 # Configuration constants
 CONFIG <- list(
-  DATA_HISTORY_YEARS = "5 years",
-  PROPHET_FORECAST_DAYS = 90,
+  DATA_HISTORY_YEARS = 5,
+  PROPHET_FORECAST_DAYS = 90, # calendar days; weekends are dropped from the forecast
   SYMBOL_MAX_LENGTH = 10,
   STRATEGY_LEVELS = c(1, 2, 3),
   STRATEGY_N = 1,
-  NOTIFICATION_DURATION = list(
-    ERROR = 5,
-    WARNING = 3
-  )
+  PROPHET_WORKERS = 2
 )
+
+# Prophet fits run in background R processes so one slow fit doesn't block
+# every other session sharing this R process
+plan(multisession, workers = CONFIG$PROPHET_WORKERS)
 
 stock_syms <- tryCatch(
   {
@@ -43,7 +46,7 @@ stock_syms <- tryCatch(
 thematic_on(font = font_spec(scale = 1.5))
 
 ui <- page_navbar(
-  useBusyIndicators(),
+  header = useBusyIndicators(),
   theme = bs_theme(preset = "bootstrap"),
   title = "lab1702's Trading Assistant",
   sidebar = sidebar(
@@ -206,127 +209,87 @@ ui <- page_navbar(
 )
 
 
+# Log the full error server-side; users only see the friendly validate() message
+log_error <- function(context, e) {
+  message(sprintf("[%s] %s: %s", format(Sys.time()), context, conditionMessage(e)))
+}
+
+download_candles <- function(symbol) {
+  from <- seq(Sys.Date(), length.out = 2, by = paste0("-", CONFIG$DATA_HISTORY_YEARS, " years"))[2]
+  not_found <- FALSE
+
+  d <- withCallingHandlers(
+    tryCatch(
+      getSymbols(Symbols = symbol, auto.assign = FALSE, from = from),
+      error = function(e) {
+        log_error(paste("download", symbol), e)
+        NULL
+      }
+    ),
+    # quantmod reports an unknown symbol as an HTTP 404 warning followed by a generic error
+    warning = function(w) {
+      if (grepl("404", conditionMessage(w))) not_found <<- TRUE
+      invokeRestart("muffleWarning")
+    }
+  )
+
+  validate(need(!is.null(d) || not_found, paste("Could not download data for", symbol, "- try again later")))
+  validate(need(!is.null(d), paste("No data found for", symbol, "- check the spelling")))
+
+  # Drop rows Yahoo returns without prices (volume may legitimately be missing)
+  d <- d[complete.cases(d[, -5]), ]
+  validate(need(nrow(d) >= 2, paste("Not enough price history for", symbol)))
+
+  # Adjust OHLC for splits and dividends so returns and signals aren't distorted
+  adjustOHLC(d, use.Adjusted = TRUE)
+}
+
+# Base plots need an explicit message; ggplot/validate outputs show it automatically
+plot_message <- function(msg) {
+  plot.new()
+  text(0.5, 0.5, msg, cex = 1.2)
+}
+
 server <- function(input, output, session) {
   # Debounce stock input to prevent excessive API calls while typing
   stock_debounced <- reactive({
     input$stock
-  }) |> debounce(1000)  # 1 second delay
+  }) |> debounce(1000) # 1 second delay
 
-  # Helper function to categorize and format error messages
-  get_error_message <- function(context, level = NULL, error_obj = NULL) {
-    # Check if no symbol is entered
-    if (is.null(input$stock) || trimws(input$stock) == "") {
-      return(list(
-        type = "empty",
-        message = "Enter a stock symbol",
-        plot_message = "Enter a stock symbol to view chart"
-      ))
-    }
-
-    # Check for data availability issues
-    if (!is.null(error_obj) && grepl("No data available|symbol not found", error_obj$message, ignore.case = TRUE)) {
-      return(list(
-        type = "no_data",
-        message = paste("No data found for", toupper(trimws(input$stock))),
-        plot_message = paste("No data available for", toupper(trimws(input$stock)))
-      ))
-    }
-
-    # Check for network/API errors
-    if (!is.null(error_obj) && grepl("network|timeout|connection|HTTP", error_obj$message, ignore.case = TRUE)) {
-      return(list(
-        type = "network",
-        message = "Network error - check internet connection",
-        plot_message = "Network error - unable to fetch data"
-      ))
-    }
-
-    # Strategy-specific errors
-    if (context == "strategy" && !is.null(level)) {
-      return(list(
-        type = "strategy",
-        message = paste("Strategy L", level, "calculation failed"),
-        plot_message = paste("Strategy L", level, "data unavailable")
-      ))
-    }
-
-    # Prophet-specific errors
-    if (context == "prophet") {
-      return(list(
-        type = "forecast",
-        message = "Forecast model failed - insufficient data",
-        plot_message = "Forecast unavailable - need more data points"
-      ))
-    }
-
-    # Generic error fallback
-    return(list(
-      type = "error",
-      message = "Calculation error occurred",
-      plot_message = "Error generating visualization"
-    ))
-  }
-
-  download_candles <- function(x) {
-    d <- tryCatch(
-      {
-        result <- getSymbols(Symbols = x, auto.assign = FALSE)
-        if (is.null(result) || nrow(result) == 0) {
-          stop("No data available for symbol: ", x)
-        }
-        result
-      },
-      error = function(e) {
-        showNotification(
-          paste("Error downloading data for", x, ":", e$message),
-          type = "error",
-          duration = CONFIG$NOTIFICATION_DURATION$ERROR
-        )
-        return(NULL)
-      }
-    )
-
-    if (!is.null(d)) {
-      xts::last(d, n = CONFIG$DATA_HISTORY_YEARS)
-    } else {
-      NULL
-    }
-  }
-
-  get_stocks_data <- reactive({
-    req(nchar(toupper(trimws(stock_debounced()))) > 0)
-
-    symbol <- toupper(trimws(stock_debounced()))
-
-    # Basic symbol validation
-    if (!grepl("^[A-Z0-9.-]+$", symbol) || nchar(symbol) > CONFIG$SYMBOL_MAX_LENGTH) {
-      showNotification(
-        "Invalid symbol format. Use only letters, numbers, dots, and hyphens.",
-        type = "warning",
-        duration = CONFIG$NOTIFICATION_DURATION$WARNING
-      )
-      return(NULL)
-    }
-
-    download_candles(x = symbol)
+  symbol <- reactive({
+    toupper(trimws(stock_debounced() %||% ""))
   })
 
   get_raw_data <- reactive({
-    req(d <- get_stocks_data())
+    sym <- symbol()
+    validate(need(nzchar(sym), "Enter a stock symbol"))
+    validate(need(
+      grepl("^[A-Z0-9.^=-]+$", sym) && nchar(sym) <= CONFIG$SYMBOL_MAX_LENGTH,
+      "Invalid symbol. Use letters, numbers, and . - ^ = only."
+    ))
 
-    list(data = d, ticker = toupper(trimws(stock_debounced())))
+    list(data = download_candles(sym), ticker = sym)
+  })
+
+  # Cache key tied to the downloaded data, so cached results refresh when new bars
+  # arrive instead of living for the lifetime of the server process
+  data_key <- reactive({
+    x <- get_raw_data()
+    list(x$ticker, end(x$data), as.numeric(xts::last(x$data)))
   })
 
   get_company_name <- reactive({
-    req(d <- get_raw_data())
+    d <- get_raw_data()
 
     if (nrow(stock_syms) == 0) {
       return(paste("Company name unavailable for", d$ticker))
     }
 
-    company_name <- stock_syms$Name[toupper(stock_syms$Symbol) == toupper(d$ticker)]
+    # A symbol can be listed on several exchanges; take the first name
+    company_name <- stock_syms$Name[toupper(stock_syms$Symbol) == d$ticker]
+    company_name <- company_name[!is.na(company_name)][1]
 
-    if (length(company_name) == 0 || is.na(company_name)) {
+    if (is.na(company_name)) {
       paste("Company name not found for", d$ticker)
     } else {
       company_name
@@ -334,82 +297,70 @@ server <- function(input, output, session) {
   })
 
   get_prophet <- reactive({
-    req(x <- get_raw_data())
+    x <- get_raw_data()
 
     d <- data.frame(
       ds = index(x$data),
-      y = as.numeric(x$data[, 4])
+      y = as.numeric(Cl(x$data))
     )
+    periods <- CONFIG$PROPHET_FORECAST_DAYS
+    ticker <- x$ticker
 
-    tryCatch(
+    future_promise(
       {
-        m0 <- prophet(df = d, weekly.seasonality = FALSE, daily.seasonality = FALSE)
-        d0 <- make_future_dataframe(m = m0, periods = CONFIG$PROPHET_FORECAST_DAYS)
+        m0 <- prophet::prophet(df = d, weekly.seasonality = FALSE, daily.seasonality = FALSE)
+        d0 <- prophet::make_future_dataframe(m = m0, periods = periods)
+        # Training data has no weekends, so don't forecast them either
+        d0 <- d0[as.POSIXlt(d0$ds)$wday %in% 1:5, , drop = FALSE]
         f0 <- predict(m0, d0)
 
-        list(ticker = x$ticker, model = m0, data = d0, forecast = f0)
+        list(ticker = ticker, model = m0, data = d0, forecast = f0)
       },
-      error = function(e) {
-        showNotification(
-          paste("Error creating Prophet forecast:", e$message),
-          type = "error",
-          duration = CONFIG$NOTIFICATION_DURATION$ERROR
-        )
-        return(NULL)
-      }
+      seed = TRUE
     )
-  }) |> bindCache(stock_debounced())
+  }) |> bindCache(data_key())
+
+  # Promise callbacks run outside the reactive context, so the symbol is passed in
+  forecast_failed <- function(sym) {
+    function(e) {
+      log_error(paste("prophet", sym), e)
+      validate(need(FALSE, paste("Forecast unavailable for", sym)))
+    }
+  }
 
   get_ichimoku <- reactive({
-    req(x <- get_raw_data())
+    x <- get_raw_data()
 
     ichimoku(x = x$data, ticker = x$ticker)
-  }) |> bindCache(stock_debounced())
+  }) |> bindCache(data_key())
 
-  # Factory function for creating strategy reactives
-  create_strategy <- function(level) {
-    reactive({
-      req(d <- get_ichimoku())
+  # Note: autostrat picks the best combination in-sample, on the same data it is
+  # then evaluated on, so its results flatter the strategy
+  create_best_strategy <- function(level) {
+    strategy <- reactive({
+      d <- get_ichimoku()
 
-      tryCatch(
-        {
-          autostrat(
-            x = d,
-            n = CONFIG$STRATEGY_N,
-            level = level,
-            quietly = TRUE
-          )
-        },
+      s <- tryCatch(
+        autostrat(
+          x = d,
+          n = CONFIG$STRATEGY_N,
+          level = level,
+          quietly = TRUE
+        ),
         error = function(e) {
-          showNotification(
-            paste("Error creating strategy L", level, ":", e$message),
-            type = "error",
-            duration = CONFIG$NOTIFICATION_DURATION$ERROR
-          )
-          return(NULL)
+          log_error(paste0("strategy L", level, " ", symbol()), e)
+          NULL
         }
       )
-    }) |> bindCache(stock_debounced(), level)
+      validate(need(length(s) > 0, paste0("Strategy L", level, " unavailable for ", symbol())))
+      s[[1]]
+    }) |> bindCache(data_key(), level)
   }
 
-  # Factory function for getting best strategy
-  create_best_strategy <- function(level) {
-    strategy_func <- create_strategy(level)
-    reactive({
-      req(s <- strategy_func())
-      if (!is.null(s) && length(s) > 0) {
-        s[[1]]
-      } else {
-        NULL
-      }
-    })
-  }
+  best_strategy <- lapply(CONFIG$STRATEGY_LEVELS, create_best_strategy)
 
-  # Strategy reactives are created dynamically in factory functions
-  # No need to pre-create them as they're called directly in outputs
-
-  # Helper function to create ggplot candlestick chart
-  create_candlestick_chart <- function(stock_data, ticker, dark_mode = FALSE) {
+  # Helper function to create ggplot candlestick chart; colors and fonts come from thematic
+  create_candlestick_chart <- function(stock_data, ticker) {
     # Convert xts to data frame
     df <- data.frame(
       Date = index(stock_data),
@@ -419,42 +370,38 @@ server <- function(input, output, session) {
       Close = as.numeric(stock_data[, 4]),
       Volume = as.numeric(stock_data[, 5])
     )
+    n <- nrow(df)
 
-    # Calculate technical indicators
-    df$SMA20 <- TTR::SMA(df$Close, n = 20)
-    df$SMA50 <- TTR::SMA(df$Close, n = 50)
+    # Calculate technical indicators, leaving them empty when history is too short
+    df$SMA20 <- if (n > 20) TTR::SMA(df$Close, n = 20) else NA_real_
+    df$SMA50 <- if (n > 50) TTR::SMA(df$Close, n = 50) else NA_real_
 
     # Bollinger Bands
-    bb <- TTR::BBands(df[, c("High", "Low", "Close")])
-    df$BB_upper <- bb[, "up"]
-    df$BB_lower <- bb[, "dn"]
-    df$BB_mavg <- bb[, "mavg"]
+    if (n > 20) {
+      bb <- TTR::BBands(df[, c("High", "Low", "Close")])
+      df$BB_upper <- bb[, "up"]
+      df$BB_lower <- bb[, "dn"]
+      df$BB_mavg <- bb[, "mavg"]
+    } else {
+      df$BB_upper <- df$BB_lower <- df$BB_mavg <- NA_real_
+    }
 
     # RSI
-    df$RSI <- TTR::RSI(df$Close)
+    df$RSI <- if (n > 14) TTR::RSI(df$Close) else NA_real_
 
     # MACD
-    macd <- TTR::MACD(df$Close)
-    df$MACD <- macd[, "macd"]
-    df$MACD_signal <- macd[, "signal"]
+    if (n > 35) {
+      macd <- TTR::MACD(df$Close)
+      df$MACD <- macd[, "macd"]
+      df$MACD_signal <- macd[, "signal"]
+    } else {
+      df$MACD <- df$MACD_signal <- NA_real_
+    }
 
     # Color for candles
-    df$direction <- ifelse(df$Close >= df$Open, "up", "down")
+    candle_color <- ifelse(df$Close >= df$Open, "#26a69a", "#ef5350")
 
-    # Set theme colors
-    if (dark_mode) {
-      bg_color <- "#1e1e1e"
-      text_color <- "white"
-      grid_color <- "#404040"
-      up_color <- "#00ff88"
-      down_color <- "#ff4444"
-    } else {
-      bg_color <- "white"
-      text_color <- "black"
-      grid_color <- "#e0e0e0"
-      up_color <- "#00aa44"
-      down_color <- "#cc2222"
-    }
+    no_x_title <- theme(axis.title.x = element_blank())
 
     # Main candlestick chart
     p1 <- ggplot(df, aes(x = Date)) +
@@ -468,13 +415,13 @@ server <- function(input, output, session) {
 
       # Candlesticks - wicks
       geom_segment(aes(x = Date, xend = Date, y = Low, yend = High),
-        color = ifelse(df$direction == "up", up_color, down_color),
+        color = candle_color,
         linewidth = 0.5
       ) +
 
       # Candlesticks - bodies
       geom_segment(aes(x = Date, xend = Date, y = Open, yend = Close),
-        color = ifelse(df$direction == "up", up_color, down_color),
+        color = candle_color,
         linewidth = 2
       ) +
 
@@ -485,173 +432,63 @@ server <- function(input, output, session) {
         title = paste(ticker, "- Candlestick Chart with Technical Indicators"),
         y = "Price ($)"
       ) +
-      theme_minimal() +
-      theme(
-        plot.background = element_rect(fill = bg_color, color = NA),
-        panel.background = element_rect(fill = bg_color, color = NA),
-        text = element_text(color = text_color, size = 14),
-        axis.text = element_text(color = text_color, size = 12),
-        axis.title = element_text(color = text_color, size = 14),
-        panel.grid = element_line(color = grid_color, linewidth = 0.3),
-        plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
-        axis.title.x = element_blank()
-      )
+      no_x_title +
+      theme(plot.title = element_text(hjust = 0.5, face = "bold"))
 
     # Volume subplot
     p2 <- ggplot(df, aes(x = Date)) +
       geom_col(aes(y = Volume),
-        fill = ifelse(df$direction == "up", up_color, down_color),
+        fill = candle_color,
         alpha = 0.7, width = 0.8
       ) +
       labs(y = "Volume") +
-      theme_minimal() +
-      theme(
-        plot.background = element_rect(fill = bg_color, color = NA),
-        panel.background = element_rect(fill = bg_color, color = NA),
-        text = element_text(color = text_color, size = 12),
-        axis.text = element_text(color = text_color, size = 11),
-        axis.title = element_text(color = text_color, size = 13),
-        panel.grid = element_line(color = grid_color, linewidth = 0.3),
-        axis.title.x = element_blank()
-      )
+      no_x_title
 
     # RSI subplot
     p3 <- ggplot(df, aes(x = Date)) +
       geom_line(aes(y = RSI), color = "cyan", linewidth = 0.8) +
       geom_hline(yintercept = 70, color = "red", linetype = "dashed", alpha = 0.7) +
       geom_hline(yintercept = 30, color = "green", linetype = "dashed", alpha = 0.7) +
-      geom_hline(yintercept = 50, color = text_color, linetype = "dotted", alpha = 0.5) +
+      geom_hline(yintercept = 50, linetype = "dotted", alpha = 0.5) +
       labs(y = "RSI") +
       ylim(0, 100) +
-      theme_minimal() +
-      theme(
-        plot.background = element_rect(fill = bg_color, color = NA),
-        panel.background = element_rect(fill = bg_color, color = NA),
-        text = element_text(color = text_color, size = 12),
-        axis.text = element_text(color = text_color, size = 11),
-        axis.title = element_text(color = text_color, size = 13),
-        panel.grid = element_line(color = grid_color, linewidth = 0.3),
-        axis.title.x = element_blank()
-      )
+      no_x_title
 
     # MACD subplot
     p4 <- ggplot(df, aes(x = Date)) +
       geom_line(aes(y = MACD), color = "blue", linewidth = 0.8) +
       geom_line(aes(y = MACD_signal), color = "red", linewidth = 0.8) +
-      geom_hline(yintercept = 0, color = text_color, linetype = "dotted", alpha = 0.5) +
-      labs(y = "MACD", x = "Date") +
-      theme_minimal() +
-      theme(
-        plot.background = element_rect(fill = bg_color, color = NA),
-        panel.background = element_rect(fill = bg_color, color = NA),
-        text = element_text(color = text_color, size = 12),
-        axis.text = element_text(color = text_color, size = 11),
-        axis.title = element_text(color = text_color, size = 13),
-        panel.grid = element_line(color = grid_color, linewidth = 0.3)
-      )
+      geom_hline(yintercept = 0, linetype = "dotted", alpha = 0.5) +
+      labs(y = "MACD", x = "Date")
 
     # Combine plots
-    combined_plot <- p1 / p2 / p3 / p4 +
+    p1 / p2 / p3 / p4 +
       plot_layout(heights = c(3, 1, 1, 1))
-
-    return(combined_plot)
   }
 
   output$candle <- renderPlot({
-    # Handle empty input
-    if (is.null(input$stock) || trimws(input$stock) == "") {
-      return(
-        ggplot() +
-          annotate("text", x = 0.5, y = 0.5, label = "Enter stock symbol to view chart", size = 6) +
-          theme_void() +
-          theme(
-            plot.background = element_rect(fill = ifelse(input$darkmode == "dark", "#1e1e1e", "white"))
-          )
-      )
-    }
+    d <- get_raw_data()
 
-    tryCatch(
-      {
-        req(d <- get_raw_data())
-
-        create_candlestick_chart(
-          stock_data = d$data,
-          ticker = d$ticker,
-          dark_mode = (input$darkmode == "dark")
-        )
-      },
-      error = function(e) {
-        error_info <- get_error_message("chart", NULL, e)
-
-        bg_color <- ifelse(input$darkmode == "dark", "#1e1e1e", "white")
-        text_color <- ifelse(input$darkmode == "dark", "white", "black")
-
-        ggplot() +
-          annotate("text",
-            x = 0.5, y = 0.6, label = error_info$plot_message,
-            size = 6, color = text_color
-          ) +
-          {
-            if (error_info$type == "no_data") {
-              annotate("text",
-                x = 0.5, y = 0.4, label = "Check symbol spelling",
-                size = 4, color = text_color
-              )
-            } else if (error_info$type == "network") {
-              annotate("text",
-                x = 0.5, y = 0.4, label = "Try again later",
-                size = 4, color = text_color
-              )
-            }
-          } +
-          theme_void() +
-          theme(
-            plot.background = element_rect(fill = bg_color, color = NA)
-          )
-      }
-    )
+    create_candlestick_chart(stock_data = d$data, ticker = d$ticker)
   })
 
   output$info <- renderText({
-    req(cname <- get_company_name())
-
-    cname
+    get_company_name()
   })
 
   # Factory function for recommendation logic
   create_recommendation <- function(level) {
-    best_strategy_func <- create_best_strategy(level)
     renderText({
-      # Handle empty input first
-      if (is.null(input$stock) || trimws(input$stock) == "") {
-        return("Enter Symbol")
+      d <- best_strategy[[level]]()
+
+      last_condition <- tail(d$cond[!is.na(d$close)], 1)
+      if (length(last_condition) == 0 || is.na(last_condition)) {
+        "NO DATA"
+      } else if (as.numeric(last_condition) == 1) {
+        "BUY / HOLD"
+      } else {
+        "SELL / WAIT"
       }
-
-      tryCatch(
-        {
-          req(d <- best_strategy_func())
-
-          last_condition <- tail(d$cond[!is.na(d$close)], 1)
-          if (length(last_condition) == 0 || is.na(last_condition)) {
-            "NO DATA"
-          } else {
-            ifelse(
-              as.numeric(last_condition) == 1,
-              "BUY / HOLD",
-              "SELL / WAIT"
-            )
-          }
-        },
-        error = function(e) {
-          error_info <- get_error_message("strategy", level, e)
-          switch(error_info$type,
-            "no_data" = "SYMBOL NOT FOUND",
-            "network" = "NETWORK ERROR",
-            "strategy" = paste("L", level, "ERROR"),
-            "ERROR"
-          )
-        }
-      )
     })
   }
 
@@ -660,16 +497,12 @@ server <- function(input, output, session) {
   output$rec3 <- create_recommendation(3)
 
   output$loaded <- renderPrint({
-    req(d <- get_raw_data())
-
-    str(d$data)
+    str(get_raw_data()$data)
   })
 
   output$recent <- renderTable(
     {
-      req(d <- get_raw_data())
-
-      tail(d$data)
+      tail(get_raw_data()$data)
     },
     striped = TRUE,
     rownames = TRUE
@@ -677,37 +510,14 @@ server <- function(input, output, session) {
 
   # Factory function for showcase plots
   create_showcase_plot <- function(level) {
-    best_strategy_func <- create_best_strategy(level)
     renderPlot({
-      # Handle empty input
-      if (is.null(input$stock) || trimws(input$stock) == "") {
-        return(
-          ggplot() +
-            annotate("text", x = 0.5, y = 0.5, label = "Enter stock symbol", size = 4) +
-            theme_void()
+      xts_df(best_strategy[[level]]()) |>
+        ggplot(aes(x = index, y = cond)) +
+        geom_line() +
+        theme(
+          axis.title = element_blank(),
+          axis.text.y = element_blank()
         )
-      }
-
-      tryCatch(
-        {
-          req(d <- best_strategy_func())
-          df <- xts_df(d)
-
-          df |>
-            ggplot(aes(x = index, y = cond)) +
-            geom_line() +
-            theme(
-              axis.title = element_blank(),
-              axis.text.y = element_blank()
-            )
-        },
-        error = function(e) {
-          error_info <- get_error_message("strategy", level, e)
-          ggplot() +
-            annotate("text", x = 0.5, y = 0.5, label = error_info$plot_message, size = 4) +
-            theme_void()
-        }
-      )
     })
   }
 
@@ -717,31 +527,14 @@ server <- function(input, output, session) {
 
   # Factory function for cloud plots
   create_cloud_plot <- function(level) {
-    best_strategy_func <- create_best_strategy(level)
     renderPlot({
-      # Handle empty input
-      if (is.null(input$stock) || trimws(input$stock) == "") {
-        plot.new()
-        text(0.5, 0.5, "Enter stock symbol", cex = 1.5)
-        return()
+      d <- best_strategy[[level]]()
+
+      if (isTRUE(input$darkmode == "dark")) {
+        plot(d, theme = "dark")
+      } else {
+        plot(d)
       }
-
-      tryCatch(
-        {
-          req(d <- best_strategy_func())
-
-          if (input$darkmode == "dark") {
-            plot(d, theme = "dark")
-          } else {
-            plot(d)
-          }
-        },
-        error = function(e) {
-          error_info <- get_error_message("strategy", level, e)
-          plot.new()
-          text(0.5, 0.5, error_info$plot_message, cex = 1.2)
-        }
-      )
     })
   }
 
@@ -751,29 +544,18 @@ server <- function(input, output, session) {
 
   # Factory function for performance plots
   create_performance_plot <- function(level) {
-    best_strategy_func <- create_best_strategy(level)
     renderPlot({
-      # Handle empty input
-      if (is.null(input$stock) || trimws(input$stock) == "") {
-        plot.new()
-        text(0.5, 0.5, "Enter stock symbol", cex = 1.5)
-        return()
-      }
+      d <- best_strategy[[level]]()
 
       tryCatch(
-        {
-          req(d <- best_strategy_func())
-
-          charts.PerformanceSummary(
-            d[, c("sret", "ret")],
-            main = paste("L", level, "Performance", attributes(d)$ticker),
-            plot.engine = "ggplot2"
-          )
-        },
+        charts.PerformanceSummary(
+          d[, c("sret", "ret")],
+          main = paste("L", level, "Performance", attributes(d)$ticker),
+          plot.engine = "ggplot2"
+        ),
         error = function(e) {
-          error_info <- get_error_message("strategy", level, e)
-          plot.new()
-          text(0.5, 0.5, error_info$plot_message, cex = 1.1)
+          log_error(paste0("performance L", level, " ", symbol()), e)
+          plot_message(paste0("Performance chart L", level, " unavailable"))
         }
       )
     })
@@ -785,57 +567,17 @@ server <- function(input, output, session) {
 
   # Factory function for strategy summaries
   create_summary <- function(level) {
-    best_strategy_func <- create_best_strategy(level)
     renderPrint({
-      # Handle empty input
-      if (is.null(input$stock) || trimws(input$stock) == "") {
-        cat("Enter a stock symbol to view strategy L", level, "summary\n")
-        return()
-      }
-
-      tryCatch(
-        {
-          req(d <- best_strategy_func())
-          summary(d)
-        },
-        error = function(e) {
-          error_info <- get_error_message("strategy", level, e)
-          switch(error_info$type,
-            "no_data" = cat("Symbol not found - check spelling\n"),
-            "network" = cat("Network error - check internet connection\n"),
-            "strategy" = cat("Strategy L", level, "calculation failed - insufficient data\n"),
-            cat("Error: Summary unavailable for strategy L", level, "\n")
-          )
-        }
-      )
+      summary(best_strategy[[level]]())
     })
   }
 
   # Factory function for outperformance tables
   create_outperformance <- function(level) {
-    best_strategy_func <- create_best_strategy(level)
     renderTable(
       {
-        # Handle empty input
-        if (is.null(input$stock) || trimws(input$stock) == "") {
-          return(data.frame(Message = "Enter stock symbol"))
-        }
-
-        tryCatch(
-          {
-            req(d <- best_strategy_func())
-            table.ProbOutPerformance(d$sret, d$ret)
-          },
-          error = function(e) {
-            error_info <- get_error_message("strategy", level, e)
-            switch(error_info$type,
-              "no_data" = data.frame(Error = "Symbol not found"),
-              "network" = data.frame(Error = "Network error"),
-              "strategy" = data.frame(Error = paste("L", level, "calculation failed")),
-              data.frame(Error = "Data unavailable")
-            )
-          }
-        )
+        d <- best_strategy[[level]]()
+        table.ProbOutPerformance(d$sret, d$ret)
       },
       striped = TRUE
     )
@@ -850,72 +592,22 @@ server <- function(input, output, session) {
   output$outperf3 <- create_outperformance(3)
 
   output$prophet <- renderPlot({
-    # Handle empty input
-    if (is.null(input$stock) || trimws(input$stock) == "") {
-      return(
-        ggplot() +
-          annotate("text", x = 0.5, y = 0.5, label = "Enter stock symbol for forecast", size = 5) +
-          theme_void()
-      )
-    }
-
-    tryCatch(
-      {
-        req(d <- get_prophet())
-
+    get_prophet() |>
+      then(function(d) {
         plot(d$model, d$forecast) +
           add_changepoints_to_plot(m = d$model)
-      },
-      error = function(e) {
-        error_info <- get_error_message("prophet", NULL, e)
-        ggplot() +
-          annotate("text", x = 0.5, y = 0.5, label = error_info$plot_message, size = 4) +
-          {
-            if (error_info$type == "no_data") {
-              annotate("text", x = 0.5, y = 0.4, label = "Symbol not found", size = 3)
-            } else if (error_info$type == "network") {
-              annotate("text", x = 0.5, y = 0.4, label = "Check connection", size = 3)
-            } else {
-              annotate("text", x = 0.5, y = 0.4, label = "Need more data points", size = 3)
-            }
-          } +
-          theme_void()
-      }
-    )
+      }) |>
+      catch(forecast_failed(symbol()))
   })
 
   output$prophet_decomp <- renderPlot({
-    # Handle empty input
-    if (is.null(input$stock) || trimws(input$stock) == "") {
-      return(
-        ggplot() +
-          annotate("text", x = 0.5, y = 0.5, label = "Enter stock symbol for decomposition", size = 5) +
-          theme_void()
-      )
-    }
-
-    tryCatch(
-      {
-        req(d <- get_prophet())
-
+    get_prophet() |>
+      then(function(d) {
+        # Draws directly; return NULL so renderPlot doesn't print the plot list again
         prophet_plot_components(m = d$model, fcst = d$forecast)
-      },
-      error = function(e) {
-        error_info <- get_error_message("prophet", NULL, e)
-        ggplot() +
-          annotate("text", x = 0.5, y = 0.5, label = error_info$plot_message, size = 4) +
-          {
-            if (error_info$type == "no_data") {
-              annotate("text", x = 0.5, y = 0.4, label = "Symbol not found", size = 3)
-            } else if (error_info$type == "network") {
-              annotate("text", x = 0.5, y = 0.4, label = "Check connection", size = 3)
-            } else {
-              annotate("text", x = 0.5, y = 0.4, label = "Insufficient data", size = 3)
-            }
-          } +
-          theme_void()
-      }
-    )
+        NULL
+      }) |>
+      catch(forecast_failed(symbol()))
   })
 }
 

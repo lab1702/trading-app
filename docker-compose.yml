@@ -4,3 +4,9 @@ services:
     ports:
       - "8001:3838"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:3838/"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3

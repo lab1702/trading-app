@@ -54,7 +54,8 @@ The application will be available at `http://localhost:8001`
 install.packages(c(
   "shiny", "bslib", "thematic", "ggplot2",
   "quantmod", "xts", "PerformanceAnalytics", 
-  "ichimoku", "prophet", "TTR", "patchwork"
+  "ichimoku", "prophet", "TTR", "patchwork",
+  "future", "promises"
 ))
 ```
 
@@ -97,16 +98,18 @@ The application will be available at `http://localhost:8001`
 # Build the Docker image
 docker build -t trading-app .
 
-# Run the container
-docker run -p 3838:3838 trading-app
+# Run the container (same port as Docker Compose)
+docker run -p 8001:3838 trading-app
 ```
 
 #### Dockerfile Details
 
-The application uses a multi-stage Docker setup based on `rocker/shiny-verse`:
+The application uses a single-stage Docker setup based on `rocker/shiny-verse`:
 
 ```dockerfile
 FROM rocker/shiny-verse
+
+RUN /usr/local/lib/R/site-library/littler/examples/update.r
 
 RUN install2.r \
     --error \
@@ -116,7 +119,9 @@ RUN install2.r \
     PerformanceAnalytics \
     ichimoku \
     prophet \
-    patchwork
+    patchwork \
+    future \
+    promises
 
 RUN rm -rf /srv/shiny-server/*
 
@@ -127,17 +132,28 @@ This provides:
 - Pre-configured R environment with tidyverse
 - Shiny server ready for production
 - All required financial analysis packages
-- Optimized for containerized deployment
+
+**Unpinned by design.** The base image tag and R package versions are intentionally
+not pinned: every build uses the latest `rocker/shiny-verse` image and upgrades all
+packages to current CRAN releases (`update.r`). This keeps the app on the latest
+versions of R, Shiny, and the analysis packages without manual version bumps. The
+trade-off is that builds are not reproducible and a new upstream release can break
+a rebuild; if that happens, fix forward or temporarily pin the tag (e.g.
+`rocker/shiny-verse:4.6.1`) until it is resolved. Please don't flag the lack of
+pinning in code reviews.
+
+Docker Compose also defines a healthcheck, so `docker ps` reports the container as unhealthy if Shiny Server stops responding.
 
 ## 📚 Application Structure
 
 ### Core Components
 
 ```
-trading-assistant/
+trading-app/
 ├── app.R                 # Main application file
 ├── Dockerfile           # Docker container configuration
 ├── docker-compose.yml   # Docker Compose orchestration
+├── LICENSE              # MIT license
 └── README.md            # This documentation
 ```
 
@@ -146,25 +162,27 @@ trading-assistant/
 ```r
 # Configuration Management
 CONFIG <- list(
-  DATA_HISTORY_YEARS = "5 years",
+  DATA_HISTORY_YEARS = 5,
   PROPHET_FORECAST_DAYS = 90,
   SYMBOL_MAX_LENGTH = 10,
-  STRATEGY_LEVELS = c(1, 2, 3)
+  STRATEGY_LEVELS = c(1, 2, 3),
+  STRATEGY_N = 1,
+  PROPHET_WORKERS = 2
 )
 
 # Factory Pattern Implementation
-create_strategy(level)           # Strategy generation
+create_best_strategy(level)      # Strategy generation (one per level, shared by outputs)
 create_recommendation(level)     # Buy/sell signals
-create_showcase_plot(level)     # Mini trend charts
-create_candlestick_chart()      # Main chart visualization
+create_showcase_plot(level)      # Mini trend charts
+create_candlestick_chart()       # Main chart visualization
 ```
 
 ## 🎯 Usage Guide
 
 ### 1. Stock Symbol Input
-- Enter any valid stock ticker (e.g., `AAPL`, `GOOGL`, `TSLA`)
-- Supports NASDAQ and major exchanges
-- Real-time validation with helpful error messages
+- Enter any valid Yahoo Finance ticker (e.g., `AAPL`, `BRK-B`, `^GSPC`, `EURUSD=X`)
+- Symbols may contain letters, numbers, and `.` `-` `^` `=` (max 10 characters)
+- Validation with helpful error messages (invalid format, unknown symbol, download failure)
 
 ### 2. Navigation Tabs
 
@@ -178,15 +196,15 @@ create_candlestick_chart()      # Main chart visualization
 - **Strategy L1/L2/L3**: Ichimoku cloud visualizations for each level
 
 #### **Performance Charts Tab**
-- **Strategy Performance**: Comparative returns analysis
-- **Risk Metrics**: Sharpe ratio, maximum drawdown, volatility
+- **Strategy Performance**: Cumulative returns of the strategy vs. buy-and-hold
+- **Period Returns and Drawdown**: Daily returns and drawdown from peak
 
 #### **Strategy Details Tab**
 - **Summary Statistics**: Detailed strategy performance metrics
 - **Outperformance Reports**: Probability analysis vs benchmark
 
 #### **Prophet Forecast Tab**
-- **Forecast**: 90-day price predictions with confidence bands
+- **Forecast**: 90-calendar-day price predictions (trading days only) with confidence bands
 - **Decomposition**: Trend, seasonal, and holiday components
 
 ### 3. Dark Mode Toggle
@@ -197,17 +215,25 @@ create_candlestick_chart()      # Main chart visualization
 ## 🔧 Technical Details
 
 ### Data Sources
-- **Stock Data**: Yahoo Finance via `quantmod` package
+- **Stock Data**: Yahoo Finance via `quantmod` package, last 5 years, adjusted for splits and dividends
 - **Company Information**: NASDAQ symbol database
 - **Technical Indicators**: Calculated using `TTR` package
 
 ### Ichimoku Strategy Levels
 
+Each level uses `ichimoku::autostrat()`, which tests every combination of Ichimoku
+conditions and picks the best-performing one. The specific conditions chosen
+therefore vary by symbol.
+
 | Level | Description | Signals Used | Complexity |
 |-------|-------------|--------------|------------|
-| L1 | Simple | s1 (Tenkan-Kijun cross) | Basic |
-| L2 | Complex | s1 & s2 (Cloud position) | Intermediate |
-| L3 | Asymmetric | s1 × s2 (Combined) | Advanced |
+| L1 | Simple | s1 (one automatically selected condition) | Basic |
+| L2 | Complex | s1 & s2 (two conditions combined) | Intermediate |
+| L3 | Asymmetric | s1 × s2 (separate entry and exit conditions) | Advanced |
+
+> **Note:** the best strategy is selected and evaluated on the same historical
+> data (in-sample), so reported performance is optimistic and will usually
+> look better than buy-and-hold. It is not an out-of-sample backtest.
 
 ### Technical Indicators
 
@@ -219,36 +245,25 @@ create_candlestick_chart()      # Main chart visualization
 
 ### Performance Features
 
-- **Reactive Caching**: Expensive calculations cached automatically
-- **Error Boundaries**: Graceful handling of API failures
-- **Input Validation**: Real-time symbol format checking
-- **Memory Optimization**: Efficient data structures and garbage collection
+- **Reactive Caching**: Ichimoku, strategy, and Prophet results are cached across sessions, keyed on the downloaded data so they refresh when new prices arrive
+- **Background Forecasting**: Prophet models are fitted in background R processes (`future`), so a slow fit doesn't block other users
+- **Debounced Input**: Typing a symbol waits 1 second before downloading or recomputing anything
+- **Error Handling**: Failures show a short message in the affected output; full error details are logged server-side
 
 ## ⚙️ Configuration
 
-### Environment Variables
-
-```r
-# Optional: Set custom configuration
-Sys.setenv(
-  TRADING_CACHE_SIZE = "100MB",
-  TRADING_DEBUG = "FALSE",
-  TRADING_TIMEOUT = "30"
-)
-```
-
 ### Customization Options
 
+The app has no environment-variable configuration. Edit the `CONFIG` object in `app.R`:
+
 ```r
-# Modify CONFIG object in app.R
 CONFIG <- list(
-  DATA_HISTORY_YEARS = "3 years",     # Adjust data history
-  PROPHET_FORECAST_DAYS = 60,         # Change forecast horizon
+  DATA_HISTORY_YEARS = 3,             # Years of price history to download
+  PROPHET_FORECAST_DAYS = 60,         # Forecast horizon in calendar days
   SYMBOL_MAX_LENGTH = 15,             # Allow longer symbols
-  NOTIFICATION_DURATION = list(       # Adjust notification timing
-    ERROR = 10,
-    WARNING = 5
-  )
+  STRATEGY_LEVELS = c(1, 2, 3),
+  STRATEGY_N = 1,
+  PROPHET_WORKERS = 2                 # Background processes for Prophet fits
 )
 ```
 
@@ -266,13 +281,13 @@ install.packages(c("quantmod", "prophet"))
 ```
 
 **2. Prophet Installation Issues**
+The R `prophet` package uses Stan (`rstan`/`StanHeaders`), not Python, and needs a C++ toolchain when built from source.
 ```r
-# Prophet requires Python backend
+# Windows: install Rtools matching your R version, then
 install.packages("prophet")
 
-# If issues persist, try:
-Sys.setenv(RETICULATE_PYTHON = "/usr/bin/python3")
-install.packages("prophet")
+# Linux: install a compiler toolchain first, e.g. sudo apt-get install build-essential
+# macOS: install the Xcode command line tools (xcode-select --install)
 ```
 
 **3. Stock Symbol Not Found**
@@ -307,8 +322,8 @@ runApp()
 
 ### Data Privacy
 - No user data stored permanently
-- All calculations performed client-side
-- External API calls limited to public market data
+- All calculations run server-side in R; the browser only displays results
+- The server makes outbound requests to Yahoo Finance (prices) and NASDAQ (symbol list) for public market data
 
 ### Production Deployment
 ```r
