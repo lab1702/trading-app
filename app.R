@@ -87,7 +87,7 @@ ui <- page_navbar(
         value_box(
           title = "Ichimoku Level 1 Strategy",
           value = textOutput("rec1"),
-          subtitle = "Simple (s1)",
+          p("Simple (s1)"),
           theme = "primary",
           showcase = plotOutput("sc1"),
           showcase_layout = "bottom"
@@ -95,7 +95,7 @@ ui <- page_navbar(
         value_box(
           title = "Ichimoku Level 2 Strategy",
           value = textOutput("rec2"),
-          subtitle = "Complex (s1 & s2)",
+          p("Complex (s1 & s2)"),
           theme = "primary",
           showcase = plotOutput("sc2"),
           showcase_layout = "bottom"
@@ -103,7 +103,7 @@ ui <- page_navbar(
         value_box(
           title = "Ichimoku Level 3 Strategy",
           value = textOutput("rec3"),
-          subtitle = "Asymmetric (s1 x s2) [Experimental]",
+          p("Asymmetric (s1 x s2) [Experimental]"),
           theme = "secondary",
           showcase = plotOutput("sc3"),
           showcase_layout = "bottom"
