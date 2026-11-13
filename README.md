@@ -182,8 +182,8 @@ create_candlestick_chart()       # Main chart visualization
 ## 🎯 Usage Guide
 
 ### 1. Stock Symbol Input
-- Enter any valid Yahoo Finance ticker (e.g., `AAPL`, `BRK-B`, `^GSPC`, `EURUSD=X`)
-- Symbols may contain letters, numbers, and `.` `-` `^` `=` (max 20 characters)
+- Enter any valid Yahoo Finance ticker (e.g., `AAPL`, `BRK-B`, `^GSPC`, `EURUSD=X`, `M&M.NS`)
+- Symbols may contain letters, numbers, and `.` `-` `^` `=` `&` `_` (max 20 characters)
 - Validation with helpful error messages (invalid characters, too long, unknown symbol, download failure)
 
 ### 2. Navigation Tabs
@@ -238,6 +238,13 @@ therefore vary by symbol.
 The BUY / HOLD or SELL / WAIT recommendation is the position the strategy holds
 for the next bar. For L3 this follows the entry/exit logic (enter when s1 turns
 true, hold until s2 turns true), not just the current s1 condition.
+
+The L3 cloud chart, performance charts, and statistics come from `ichimoku`,
+which leaves out a still-open L3 position for as long as its exit condition has
+stayed true since the entry. The recommendation and the small position chart on
+the Summary tab do show that position, so L3 can read BUY / HOLD while its other
+charts end flat. Once the exit condition turns false, `ichimoku` adds the whole
+stretch back to those charts and statistics.
 
 > **Note:** the best strategy is selected and evaluated on the same historical
 > data (in-sample), so reported performance is optimistic and will usually

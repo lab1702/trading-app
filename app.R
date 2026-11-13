@@ -313,8 +313,8 @@ server <- function(input, output, session) {
     sym <- symbol()
     validate(need(nzchar(sym), "Enter a stock symbol"))
     validate(need(
-      grepl("^[A-Z0-9.^=-]+$", sym),
-      "Invalid symbol. Use letters, numbers, and . - ^ = only."
+      grepl("^[A-Z0-9.^=&_-]+$", sym),
+      "Invalid symbol. Use letters, numbers, and . - ^ = & _ only."
     ))
     validate(need(
       nchar(sym) <= CONFIG$SYMBOL_MAX_LENGTH,
@@ -597,7 +597,7 @@ server <- function(input, output, session) {
       geom_line(aes(y = SMA50), color = "purple", linewidth = 0.8, alpha = 0.8) +
       labs(
         title = paste(ticker, "- Candlestick Chart with Technical Indicators"),
-        y = "Price ($)"
+        y = "Price"
       ) +
       no_x_title +
       theme(plot.title = element_text(hjust = 0.5, face = "bold"))
