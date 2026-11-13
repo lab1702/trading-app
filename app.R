@@ -432,7 +432,14 @@ server <- function(input, output, session) {
       paste("Not enough price history for Ichimoku analysis of", x$ticker)
     ))
 
-    ichimoku(x = x$data, ticker = x$ticker)
+    # ichimoku dates the future cloud on weekdays only unless holidays = NULL, which
+    # would misdate it for symbols that trade every day of the week (crypto)
+    wday <- as.POSIXlt(index(x$data))$wday
+    if (mean(wday == 0) > 0.1 && mean(wday == 6) > 0.1) {
+      ichimoku(x = x$data, ticker = x$ticker, holidays = NULL)
+    } else {
+      ichimoku(x = x$data, ticker = x$ticker)
+    }
   }) |> bindCache(data_key())
 
   # Positions held on each bar, ending with the next (not yet traded) bar, as a data
@@ -750,7 +757,12 @@ server <- function(input, output, session) {
     renderTable(
       {
         d <- best_strategy[[level]]()
-        table.ProbOutPerformance(d$sret, d$ret)
+
+        # Only bars that have returns: the strategy also carries the future cloud
+        # dates and the bars before its conditions are defined, and the table would
+        # count the shortened windows around them as full periods
+        r <- na.omit(d[, c("sret", "ret")])
+        table.ProbOutPerformance(r$sret, r$ret)
       },
       striped = TRUE
     )
