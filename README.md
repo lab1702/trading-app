@@ -239,12 +239,13 @@ The BUY / HOLD or SELL / WAIT recommendation is the position the strategy holds
 for the next bar. For L3 this follows the entry/exit logic (enter when s1 turns
 true, hold until s2 turns true), not just the current s1 condition.
 
-The L3 cloud chart, performance charts, and statistics come from `ichimoku`,
-which leaves out a still-open L3 position for as long as its exit condition has
-stayed true since the entry. The recommendation and the small position chart on
-the Summary tab do show that position, so L3 can read BUY / HOLD while its other
-charts end flat. Once the exit condition turns false, `ichimoku` adds the whole
-stretch back to those charts and statistics.
+`ichimoku` leaves a still-open L3 position out of its positions, returns, and
+summary for as long as the exit condition has stayed true since the entry. The
+app adds that position back, so the L3 charts and statistics show the same
+position as the recommendation. The best L3 combination is still chosen by
+`ichimoku`'s own ranking, which leaves such an open position out, so a
+combination sitting in an open losing trade can be ranked higher than its
+statistics here justify.
 
 > **Note:** the best strategy is selected and evaluated on the same historical
 > data (in-sample), so reported performance is optimistic and will usually

@@ -494,6 +494,39 @@ server <- function(input, output, session) {
     data.frame(index = index(s)[seq_len(end + 1)], posn = posn)
   }
 
+  # strat() leaves a still-open level 3 position out of its positions, returns and
+  # summary for as long as the exit condition has stayed true since the entry, and
+  # adds the whole stretch back once that condition turns false. Rebuild them from
+  # the replayed positions so the charts and statistics agree with the
+  # recommendation. The rest follows strat(): a position still open at the end is
+  # closed on the last bar.
+  include_open_position <- function(s) {
+    core <- coredata(s)
+    posn <- core[, "posn"]
+    defined <- which(!is.na(posn))
+    posn[defined] <- replay_positions(s)$posn[defined]
+    if (identical(posn, core[, "posn"])) {
+      return(s)
+    }
+
+    end <- max(defined)
+    txn <- c(NA, diff(posn))
+    txn[which(posn == 1 & is.na(txn))] <- 1
+    if (posn[end] == 1) txn[end + 1] <- -1
+    slogret <- core[, "logret"] * posn
+
+    s$posn <- posn
+    s$txn <- txn
+    s$slogret <- slogret
+    s$sret <- exp(slogret) - 1
+    # Not exported, but the only way to rebuild the summary the way strat() does
+    ichimoku:::writeStrat(
+      x = s,
+      strategy = attr(s, "strat")["Strategy", ][[1]],
+      dir = attr(s, "strat")["Direction", ][[1]]
+    )
+  }
+
   # Note: autostrat picks the best combination in-sample, on the same data it is
   # then evaluated on, so its results flatter the strategy
   create_best_strategy <- function(level) {
@@ -501,11 +534,14 @@ server <- function(input, output, session) {
       d <- get_ichimoku()
 
       s <- tryCatch(
-        autostrat(
-          x = d,
-          n = CONFIG$STRATEGY_N,
-          level = level,
-          quietly = TRUE
+        lapply(
+          autostrat(
+            x = d,
+            n = CONFIG$STRATEGY_N,
+            level = level,
+            quietly = TRUE
+          ),
+          include_open_position
         ),
         error = function(e) {
           log_error(paste0("strategy L", level, " ", symbol()), e)
