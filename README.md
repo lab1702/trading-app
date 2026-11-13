@@ -164,7 +164,7 @@ trading-app/
 CONFIG <- list(
   DATA_HISTORY_YEARS = 5,
   PROPHET_FORECAST_DAYS = 90,
-  SYMBOL_MAX_LENGTH = 10,
+  SYMBOL_MAX_LENGTH = 20,
   STRATEGY_LEVELS = c(1, 2, 3),
   STRATEGY_N = 1,
   MIN_ICHIMOKU_ROWS = 104,
@@ -183,7 +183,7 @@ create_candlestick_chart()       # Main chart visualization
 
 ### 1. Stock Symbol Input
 - Enter any valid Yahoo Finance ticker (e.g., `AAPL`, `BRK-B`, `^GSPC`, `EURUSD=X`)
-- Symbols may contain letters, numbers, and `.` `-` `^` `=` (max 10 characters)
+- Symbols may contain letters, numbers, and `.` `-` `^` `=` (max 20 characters)
 - Validation with helpful error messages (invalid characters, too long, unknown symbol, download failure)
 
 ### 2. Navigation Tabs
@@ -268,7 +268,7 @@ The app has no environment-variable configuration. Edit the `CONFIG` object in `
 CONFIG <- list(
   DATA_HISTORY_YEARS = 3,             # Years of price history to download
   PROPHET_FORECAST_DAYS = 60,         # Forecast horizon in calendar days
-  SYMBOL_MAX_LENGTH = 15,             # Allow longer symbols
+  SYMBOL_MAX_LENGTH = 30,             # Allow longer symbols
   STRATEGY_LEVELS = c(1, 2, 3),
   STRATEGY_N = 1,
   MIN_ICHIMOKU_ROWS = 104,            # Minimum daily bars for Ichimoku analysis

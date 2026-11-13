@@ -28,7 +28,7 @@ utils::globalVariables(c(
 CONFIG <- list(
   DATA_HISTORY_YEARS = 5,
   PROPHET_FORECAST_DAYS = 90, # calendar days; weekends are dropped from the forecast
-  SYMBOL_MAX_LENGTH = 10,
+  SYMBOL_MAX_LENGTH = 20,
   STRATEGY_LEVELS = c(1, 2, 3),
   STRATEGY_N = 1,
   # ichimoku() can segfault on shorter series, and autostrat() fails on every level
