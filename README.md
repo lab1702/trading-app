@@ -249,7 +249,7 @@ true, hold until s2 turns true), not just the current s1 condition.
 - **Moving Averages**: SMA20 (orange), SMA50 (purple)
 - **RSI**: 14-period Relative Strength Index
 - **MACD**: 12,26,9 Moving Average Convergence Divergence
-- **Ichimoku Cloud**: Full Ichimoku Kinko Hyo system
+- **Ichimoku Cloud**: Full Ichimoku Kinko Hyo system. The projected part of the cloud is dated on Monday-Friday, or on every day for symbols that also trade on weekends (crypto); for markets with a Sunday-Thursday week those future dates are off by a day or two
 
 ### Performance Features
 
