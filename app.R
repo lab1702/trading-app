@@ -34,8 +34,8 @@ CONFIG <- list(
   # ichimoku() can segfault on shorter series, and autostrat() fails on every level
   # below 52 + 2 * 26 periods (the cloud plus comparisons with the lagged chikou)
   MIN_ICHIMOKU_ROWS = 104,
-  # Below this, autostrat() may find no combination with any trades (most often for
-  # level 3, which needs both an entry and an exit), so a failure means short history
+  # Below this, the strategy search may find no combination with any trades, so a
+  # failure means short history
   MIN_RELIABLE_STRATEGY_ROWS = 130,
   PROPHET_WORKERS = 2
 )
@@ -550,20 +550,74 @@ server <- function(input, output, session) {
     s
   }
 
-  # Note: autostrat picks the best combination in-sample, on the same data it is
-  # then evaluated on, so its results flatter the strategy
+  # The n best level 3 combinations, in place of autostrat(level = 3). autostrat()
+  # ranks them on positions taken one bar before strat() can take them, crediting
+  # every trade with the return of the bar whose close gave its signal, so it
+  # picks the combination that gains most from that look-ahead. This ranks the
+  # same combinations over the same bars, on the positions of replay_positions().
+  best_asymmetric <- function(d, n) {
+    core <- coredata(d)
+    rows <- nrow(core)
+    p2 <- attr(d, "periods")[2L]
+
+    # The conditions autostrat() combines, on every bar. Like strat(), a comparison
+    # with the chikou span is moved to the bar where it becomes known.
+    names <- colnames(mlgrid(d, y = "none", type = "boolean", unique = FALSE))
+    cond <- sapply(strsplit(names, "_", fixed = TRUE), function(s) {
+      offset <- (p2 - 1L) * ("chikou" %in% s)
+      c(rep(NA, offset), (core[, s[1]] > core[, s[2]])[seq_len(rows - offset)])
+    })
+    # Like strat(), a condition that is true on its first defined bar counts
+    was_on <- rbind(NA, cond[-rows, , drop = FALSE])
+    turns_on <- !is.na(cond) & cond & (is.na(was_on) | !was_on)
+
+    # The position that follows from the conditions up to a bar is taken at the next
+    # open and earns the return to the open after that. Returns only count on the
+    # bars where every condition is defined, so all combinations cover the same bars.
+    ret <- c(diff(log(core[, "open"]))[-1], NA, NA)
+    counted <- stats::complete.cases(cond, ret)
+    if (!any(counted)) {
+      return(list())
+    }
+
+    # autostrat()'s combinations: the entry condition comes after the exit condition
+    pairs <- which(lower.tri(diag(length(names))), arr.ind = TRUE)
+    entry <- pairs[, 1]
+    exit <- pairs[, 2]
+    held <- logical(nrow(pairs))
+    logret <- numeric(nrow(pairs))
+    for (i in seq_len(max(which(counted)))) {
+      held <- (held & !turns_on[i, exit]) | (!held & turns_on[i, entry])
+      if (counted[i]) logret[held] <- logret[held] + ret[i]
+    }
+
+    best <- order(logret, decreasing = TRUE)
+    best <- utils::head(best[logret[best] != 0], n)
+    lapply(best, function(i) {
+      s1 <- strsplit(names[entry[i]], "_", fixed = TRUE)[[1]]
+      s2 <- strsplit(names[exit[i]], "_", fixed = TRUE)[[1]]
+      strat(d, c1 = s1[1], c2 = s1[2], c3 = s2[1], c4 = s2[2], type = 3)
+    })
+  }
+
+  # Note: the best combination is picked in-sample, on the same data it is then
+  # evaluated on, so its results flatter the strategy
   create_best_strategy <- function(level) {
     strategy <- reactive({
       d <- get_ichimoku()
 
       s <- tryCatch(
         lapply(
-          autostrat(
-            x = d,
-            n = CONFIG$STRATEGY_N,
-            level = level,
-            quietly = TRUE
-          ),
+          if (level == 3) {
+            best_asymmetric(d, n = CONFIG$STRATEGY_N)
+          } else {
+            autostrat(
+              x = d,
+              n = CONFIG$STRATEGY_N,
+              level = level,
+              quietly = TRUE
+            )
+          },
           function(s) include_open_position(align_second_condition(s, d))
         ),
         error = function(e) {

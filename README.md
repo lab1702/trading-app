@@ -219,15 +219,18 @@ create_candlestick_chart()       # Main chart visualization
 ### Data Sources
 - **Stock Data**: Yahoo Finance chart API, last 5 years, adjusted for splits and dividends. Each daily bar is dated by its exchange's local calendar
 - **Completed Bars Only**: today's still-forming bar (by the exchange's local date) is dropped, along with the live quote bar Yahoo adds for a session that is still open, so signals don't flip intraday. A day's bar is used from the next calendar day on the exchange's calendar, once Yahoo has published its closing price (for some markets that takes hours after the close)
-- **Minimum History**: Ichimoku strategies need at least 104 daily bars; newer listings show a "not enough history" message. Up to about 130 bars a strategy level (most often L3) may find no combination with any trades, which also shows a "not enough history" message
+- **Minimum History**: Ichimoku strategies need at least 104 daily bars; newer listings show a "not enough history" message. Up to about 130 bars a strategy level may find no combination with any trades, which also shows a "not enough history" message
 - **Company Information**: NASDAQ symbol database
 - **Technical Indicators**: Calculated using `TTR` package
 
 ### Ichimoku Strategy Levels
 
-Each level uses `ichimoku::autostrat()`, which tests every combination of Ichimoku
-conditions and picks the best-performing one. The specific conditions chosen
-therefore vary by symbol.
+Each level tests every combination of Ichimoku conditions and picks the
+best-performing one, so the conditions chosen vary by symbol. L1 and L2 use
+`ichimoku::autostrat()`; the app ranks the L3 combinations itself (see below).
+Combinations are compared over the bars where every condition is defined, while
+the statistics of the chosen strategy cover all bars where its own conditions
+are defined.
 
 | Level | Description | Signals Used | Complexity |
 |-------|-------------|--------------|------------|
@@ -247,10 +250,12 @@ recommendation, charts, and statistics are those of the combination as ranked.
 `ichimoku` leaves a still-open L3 position out of its positions, returns, and
 summary for as long as the exit condition has stayed true since the entry. The
 app adds that position back, so the L3 charts and statistics show the same
-position as the recommendation. The best L3 combination is still chosen by
-`ichimoku`'s own ranking, which leaves such an open position out, so a
-combination sitting in an open losing trade can be ranked higher than its
-statistics here justify.
+position as the recommendation.
+
+`ichimoku`'s own L3 ranking takes every position one bar before it can be
+traded, which favors combinations that only do well with that head start. The
+app therefore ranks the same L3 combinations on the positions described above,
+including a still-open one.
 
 > **Note:** the best strategy is selected and evaluated on the same historical
 > data (in-sample), so reported performance is optimistic and will usually
