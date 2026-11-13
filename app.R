@@ -649,10 +649,18 @@ server <- function(input, output, session) {
 
   output$recent <- renderTable(
     {
-      tail(get_raw_data()$data)
+      d <- as.data.frame(tail(get_raw_data()$data))
+
+      # renderTable's default of 2 decimals shows the same value in every price
+      # column for currencies and sub-dollar prices
+      prices <- colnames(d) != "Volume"
+      d[prices] <- lapply(d[prices], format, digits = 6)
+      d$Volume <- format(d$Volume, big.mark = ",", scientific = FALSE)
+      d
     },
     striped = TRUE,
-    rownames = TRUE
+    rownames = TRUE,
+    align = "r"
   )
 
   # Factory function for showcase plots of the position held (not the entry
