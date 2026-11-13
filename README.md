@@ -206,7 +206,7 @@ create_candlestick_chart()       # Main chart visualization
 - **Outperformance Reports**: Probability analysis vs benchmark
 
 #### **Prophet Forecast Tab**
-- **Forecast**: 90-calendar-day price predictions (only on weekdays the symbol trades) with confidence bands
+- **Forecast**: 90-calendar-day price predictions (only on weekdays the symbol trades, judged from its latest 60 bars) with confidence bands
 - **Decomposition**: Trend and yearly seasonality components
 
 ### 3. Dark Mode Toggle

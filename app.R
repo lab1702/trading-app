@@ -368,9 +368,15 @@ server <- function(input, output, session) {
       {
         m0 <- prophet::prophet(df = d, weekly.seasonality = FALSE, daily.seasonality = FALSE)
         d0 <- prophet::make_future_dataframe(m = m0, periods = periods)
-        # Only forecast weekdays the symbol actually trades on (no weekends for
-        # stocks, every day for crypto)
-        d0 <- d0[as.POSIXlt(d0$ds)$wday %in% unique(as.POSIXlt(d$ds)$wday), , drop = FALSE]
+        # Only forecast weekdays the symbol trades on (no weekends for stocks, every
+        # day for crypto). Judged on the latest bars, where a regular weekday makes
+        # up at least a seventh: a one-off special session (a Saturday budget-day
+        # session in India) or a trading week the exchange has since changed
+        # doesn't count.
+        recent <- as.POSIXlt(utils::tail(d$ds, 60))$wday
+        traded <- which(tabulate(recent + 1, nbins = 7) > 0.05 * length(recent)) - 1
+        is_future <- d0$ds > max(m0$history$ds)
+        d0 <- d0[!is_future | as.POSIXlt(d0$ds)$wday %in% traded, , drop = FALSE]
         f0 <- predict(m0, d0)
 
         list(ticker = ticker, model = m0, data = d0, forecast = f0)
