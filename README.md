@@ -219,7 +219,7 @@ create_candlestick_chart()       # Main chart visualization
 
 ### Data Sources
 - **Stock Data**: Yahoo Finance chart API, last 5 years, adjusted for splits and dividends. Each daily bar is dated by its exchange's local calendar
-- **Completed Bars Only**: today's still-forming bar (by New York date) is dropped, so signals don't flip intraday. A day's bar is used from the next calendar day
+- **Completed Bars Only**: today's still-forming bar (by New York date) is dropped, along with the live quote bar Yahoo adds for a session that is still open, so signals don't flip intraday. A day's bar is used from the next calendar day
 - **Minimum History**: Ichimoku strategies need at least 104 daily bars; newer listings show a "not enough history" message. Up to about 130 bars a strategy level (most often L3) may find no combination with any trades, which also shows a "not enough history" message
 - **Company Information**: NASDAQ symbol database
 - **Technical Indicators**: Calculated using `TTR` package

@@ -248,7 +248,7 @@ fetch_yahoo_daily <- function(symbol, from) {
   bar_start <- .POSIXct(y$timestamp[[1]], tz = "UTC")
 
   # Plain column names: ichimoku matches columns by name
-  xts(
+  bars <- xts(
     cbind(
       Open = as.numeric(quote$open), High = as.numeric(quote$high), Low = as.numeric(quote$low),
       Close = as.numeric(quote$close), Volume = as.numeric(quote$volume),
@@ -256,6 +256,11 @@ fetch_yahoo_daily <- function(symbol, from) {
     ),
     order.by = as.Date(bar_start, tz = y$meta$exchangeTimezoneName %||% "UTC")
   )
+
+  # Completed bars are stamped with their session start. For some open sessions
+  # (futures, Sydney) Yahoo adds the live quote as a bar stamped with the last trade
+  # time, which is delayed, so just after midnight that bar still has yesterday's date.
+  bars[!y$timestamp[[1]] %in% y$meta$regularMarketTime, ]
 }
 
 download_candles <- function(symbol) {
