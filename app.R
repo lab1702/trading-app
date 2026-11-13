@@ -226,39 +226,57 @@ log_error <- function(context, e) {
   message(sprintf("[%s] %s: %s", format(Sys.time()), context, conditionMessage(e)))
 }
 
+# Daily bars from Yahoo's chart API, dated by the exchange's own calendar; NULL for
+# an unknown symbol. quantmod::getSymbols() isn't used because it dates each bar by
+# the UTC date of its start, which is the previous day wherever the trading day
+# starts before midnight UTC (currencies during UK summer time, Sydney, Auckland).
+# A still-forming bar could then pass as a completed bar of the day before.
+fetch_yahoo_daily <- function(symbol, from) {
+  url <- sprintf(
+    "https://query2.finance.yahoo.com/v8/finance/chart/%s?period1=%.0f&period2=%.0f&interval=1d",
+    utils::URLencode(symbol, reserved = TRUE),
+    as.numeric(as.POSIXct(from, tz = "UTC")), as.numeric(Sys.time())
+  )
+  res <- curl::curl_fetch_memory(url)
+  if (res$status_code == 404) {
+    return(NULL)
+  }
+  if (res$status_code != 200) stop("HTTP status ", res$status_code)
+
+  y <- jsonlite::fromJSON(rawToChar(res$content))$chart$result
+  quote <- unlist(y$indicators$quote[[1]], recursive = FALSE)
+  bar_start <- .POSIXct(y$timestamp[[1]], tz = "UTC")
+
+  # Plain column names: ichimoku matches columns by name
+  xts(
+    cbind(
+      Open = as.numeric(quote$open), High = as.numeric(quote$high), Low = as.numeric(quote$low),
+      Close = as.numeric(quote$close), Volume = as.numeric(quote$volume),
+      Adjusted = as.numeric(unlist(y$indicators$adjclose))
+    ),
+    order.by = as.Date(bar_start, tz = y$meta$exchangeTimezoneName %||% "UTC")
+  )
+}
+
 download_candles <- function(symbol) {
   from <- seq(Sys.Date(), length.out = 2, by = paste0("-", CONFIG$DATA_HISTORY_YEARS, " years"))[2]
-  not_found <- FALSE
 
-  d <- withCallingHandlers(
-    tryCatch(
-      getSymbols(Symbols = symbol, auto.assign = FALSE, from = from),
-      error = function(e) {
-        log_error(paste("download", symbol), e)
-        NULL
-      }
-    ),
-    # quantmod reports an unknown symbol as an HTTP 404 warning followed by a generic error.
-    # The warning quotes the request URL, whose symbol or timestamps can contain "404"
-    # themselves, so the URL is removed before looking for the status
-    warning = function(w) {
-      if (grepl("404", sub("'[^']*'", "", conditionMessage(w)))) not_found <<- TRUE
-      invokeRestart("muffleWarning")
+  d <- tryCatch(
+    fetch_yahoo_daily(symbol, from),
+    error = function(e) {
+      log_error(paste("download", symbol), e)
+      e
     }
   )
 
-  validate(need(!is.null(d) || not_found, paste("Could not download data for", symbol, "- try again later")))
+  validate(need(!inherits(d, "error"), paste("Could not download data for", symbol, "- try again later")))
   validate(need(!is.null(d), paste("No data found for", symbol, "- check the spelling")))
-
-  # quantmod prefixes columns with the ticker (e.g. "LOW.Open"), which confuses
-  # ichimoku's name matching for tickers like LOW or HIGH
-  colnames(d) <- c("Open", "High", "Low", "Close", "Volume", "Adjusted")
 
   # Drop rows Yahoo returns without prices (volume may legitimately be missing)
   d <- d[complete.cases(d[, -5]), ]
 
   # Drop today's still-forming bar so signals only use completed bars
-  d <- d[as.Date(index(d)) < as.Date(Sys.time(), tz = CONFIG$MARKET_TZ), ]
+  d <- d[index(d) < as.Date(Sys.time(), tz = CONFIG$MARKET_TZ), ]
   validate(need(nrow(d) >= 2, paste("Not enough price history for", symbol)))
 
   # Adjust OHLC for splits and dividends so returns and signals aren't distorted
@@ -327,10 +345,14 @@ server <- function(input, output, session) {
   # ExtendedTask queues calls made while a fit is running, so a queued fit for a
   # symbol the user has since moved past (or one already cached) is skipped.
   wanted_prophet_key <- NULL
+  # Key of the fit the task last started. An "error" status belongs to this key, not
+  # to prophet_task_key, which already names the next fit while that one is queued.
+  started_prophet_key <- NULL
   prophet_task <- ExtendedTask$new(function(d, periods, ticker, key) {
     if (!identical(wanted_prophet_key, key) || prophet_cache$exists(key)) {
       return(promise_resolve(NULL))
     }
+    started_prophet_key <<- key
 
     future_promise(
       {
@@ -386,7 +408,7 @@ server <- function(input, output, session) {
       return(res)
     }
 
-    if (status == "error" && identical(prophet_task_key(), key)) {
+    if (status == "error" && identical(started_prophet_key, key)) {
       log_error(paste("prophet", symbol()), tryCatch(prophet_task$result(), error = identity))
       validate(need(FALSE, paste("Forecast unavailable for", symbol())))
     }
