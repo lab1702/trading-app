@@ -185,7 +185,7 @@ create_candlestick_chart()       # Main chart visualization
 ### 1. Stock Symbol Input
 - Enter any valid Yahoo Finance ticker (e.g., `AAPL`, `BRK-B`, `^GSPC`, `EURUSD=X`)
 - Symbols may contain letters, numbers, and `.` `-` `^` `=` (max 10 characters)
-- Validation with helpful error messages (invalid format, unknown symbol, download failure)
+- Validation with helpful error messages (invalid characters, too long, unknown symbol, download failure)
 
 ### 2. Navigation Tabs
 

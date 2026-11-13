@@ -285,8 +285,12 @@ server <- function(input, output, session) {
     sym <- symbol()
     validate(need(nzchar(sym), "Enter a stock symbol"))
     validate(need(
-      grepl("^[A-Z0-9.^=-]+$", sym) && nchar(sym) <= CONFIG$SYMBOL_MAX_LENGTH,
+      grepl("^[A-Z0-9.^=-]+$", sym),
       "Invalid symbol. Use letters, numbers, and . - ^ = only."
+    ))
+    validate(need(
+      nchar(sym) <= CONFIG$SYMBOL_MAX_LENGTH,
+      paste("Symbol too long. Use at most", CONFIG$SYMBOL_MAX_LENGTH, "characters.")
     ))
 
     list(data = download_candles(sym), ticker = sym)
@@ -665,14 +669,14 @@ server <- function(input, output, session) {
       d <- best_strategy[[level]]()
 
       # Built from the parts of charts.PerformanceSummary(), whose ggplot2 engine
-      # ignores the title
+      # ignores the title. No legend.loc: the ggplot2 engine uses it as
+      # legend.position, and base positions like "topleft" hide the legend.
       tryCatch(
         {
           r <- d[, c("sret", "ret")]
           p_cum <- chart.CumReturns(
             r,
-            main = "Cumulative Return", ylab = "Cumulative Return",
-            legend.loc = "topleft", plot.engine = "ggplot2"
+            main = "Cumulative Return", ylab = "Cumulative Return", plot.engine = "ggplot2"
           )
           p_dd <- chart.Drawdown(r, main = "Drawdown", ylab = "Drawdown", plot.engine = "ggplot2")
 
