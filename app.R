@@ -238,9 +238,11 @@ download_candles <- function(symbol) {
         NULL
       }
     ),
-    # quantmod reports an unknown symbol as an HTTP 404 warning followed by a generic error
+    # quantmod reports an unknown symbol as an HTTP 404 warning followed by a generic error.
+    # The warning quotes the request URL, whose symbol or timestamps can contain "404"
+    # themselves, so the URL is removed before looking for the status
     warning = function(w) {
-      if (grepl("404", conditionMessage(w))) not_found <<- TRUE
+      if (grepl("404", sub("'[^']*'", "", conditionMessage(w)))) not_found <<- TRUE
       invokeRestart("muffleWarning")
     }
   )

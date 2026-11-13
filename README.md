@@ -3,7 +3,7 @@
 A modern, interactive Shiny web application for comprehensive stock analysis using Ichimoku cloud strategies and Prophet forecasting.
 
 [![R](https://img.shields.io/badge/R-4.4%2B-blue.svg)](https://www.r-project.org/)
-[![Shiny](https://img.shields.io/badge/Shiny-1.8.1%2B-green.svg)](https://shiny.rstudio.com/)
+[![Shiny](https://img.shields.io/badge/Shiny-1.9.0%2B-green.svg)](https://shiny.rstudio.com/)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ## 🌟 Features
@@ -68,8 +68,8 @@ install.packages(c(
 # Method 1: Run directly
 shiny::runApp()
 
-# Method 2: Source the file
-source("app.R")
+# Method 2: Run the app file by path
+shiny::runApp("app.R")
 
 # Method 3: Run on a fixed port
 shiny::runApp(launch.browser = TRUE, port = 3838)
