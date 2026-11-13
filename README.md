@@ -239,6 +239,11 @@ The BUY / HOLD or SELL / WAIT recommendation is the position the strategy holds
 for the next bar. For L3 this follows the entry/exit logic (enter when s1 turns
 true, hold until s2 turns true), not just the current s1 condition.
 
+When the second condition of an L2 combination involves the chikou span,
+`ichimoku` builds the strategy with that condition one bar later than in the
+ranking it chose the combination by. The app removes the extra bar, so the L2
+recommendation, charts, and statistics are those of the combination as ranked.
+
 `ichimoku` leaves a still-open L3 position out of its positions, returns, and
 summary for as long as the exit condition has stayed true since the entry. The
 app adds that position back, so the L3 charts and statistics show the same

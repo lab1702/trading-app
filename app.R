@@ -527,6 +527,29 @@ server <- function(input, output, session) {
     )
   }
 
+  # strat() delays a chikou condition in the second slot of a level 2 strategy by
+  # one bar more than ichimoku does everywhere else, including in the ranking that
+  # autostrat() picked the combination by. Combining the strategies of the two
+  # conditions gives the positions that were ranked. The rest follows strat():
+  # returns are only defined where the position is.
+  align_second_condition <- function(s, d) {
+    rules <- strsplit(attr(s, "strat")["Strategy", ][[1]], " & ", fixed = TRUE)[[1]]
+    if (length(rules) < 2 || !"chikou" %in% strsplit(rules[2], " > ", fixed = TRUE)[[1]]) {
+      return(s)
+    }
+
+    args <- strsplit(rules, " > ", fixed = TRUE)
+    s <- stratcombine(
+      strat(d, c1 = args[[1]][1], c2 = args[[1]][2]),
+      strat(d, c1 = args[[2]][1], c2 = args[[2]][2])
+    )
+    logret <- coredata(s)[, "logret"]
+    logret[is.na(coredata(s)[, "posn"])] <- NA
+    s$logret <- logret
+    s$ret <- exp(logret) - 1
+    s
+  }
+
   # Note: autostrat picks the best combination in-sample, on the same data it is
   # then evaluated on, so its results flatter the strategy
   create_best_strategy <- function(level) {
@@ -541,7 +564,7 @@ server <- function(input, output, session) {
             level = level,
             quietly = TRUE
           ),
-          include_open_position
+          function(s) include_open_position(align_second_condition(s, d))
         ),
         error = function(e) {
           log_error(paste0("strategy L", level, " ", symbol()), e)
