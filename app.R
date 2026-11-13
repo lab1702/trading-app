@@ -12,6 +12,11 @@ library(patchwork)
 library(future)
 library(promises)
 
+# ichimoku stores dates as UTC midnights but formats them, and picks the weekdays
+# of the future cloud dates, in the session timezone. West of UTC every date would
+# show as the previous day.
+Sys.setenv(TZ = "UTC")
+
 # Suppress R CMD check notes for ggplot2 aesthetics
 utils::globalVariables(c(
   "BB_lower", "BB_upper", "BB_mavg", "Low", "High", "Open", "Close",
@@ -32,8 +37,6 @@ CONFIG <- list(
   # Below this, autostrat() may find no combination with any trades (most often for
   # level 3, which needs both an entry and an exit), so a failure means short history
   MIN_RELIABLE_STRATEGY_ROWS = 130,
-  # Bars dated on or after today in this timezone are still forming and are dropped
-  MARKET_TZ = "America/New_York",
   PROPHET_WORKERS = 2
 )
 
@@ -226,11 +229,11 @@ log_error <- function(context, e) {
   message(sprintf("[%s] %s: %s", format(Sys.time()), context, conditionMessage(e)))
 }
 
-# Daily bars from Yahoo's chart API, dated by the exchange's own calendar; NULL for
-# an unknown symbol. quantmod::getSymbols() isn't used because it dates each bar by
-# the UTC date of its start, which is the previous day wherever the trading day
-# starts before midnight UTC (currencies during UK summer time, Sydney, Auckland).
-# A still-forming bar could then pass as a completed bar of the day before.
+# Completed daily bars from Yahoo's chart API, dated by the exchange's own calendar;
+# NULL for an unknown symbol. quantmod::getSymbols() isn't used because it dates
+# each bar by the UTC date of its start, which is the previous day wherever the
+# trading day starts before midnight UTC (currencies during UK summer time, Sydney,
+# Auckland). A still-forming bar could then pass as a completed bar of the day before.
 fetch_yahoo_daily <- function(symbol, from) {
   url <- sprintf(
     "https://query2.finance.yahoo.com/v8/finance/chart/%s?period1=%.0f&period2=%.0f&interval=1d",
@@ -246,6 +249,7 @@ fetch_yahoo_daily <- function(symbol, from) {
   y <- jsonlite::fromJSON(rawToChar(res$content))$chart$result
   quote <- unlist(y$indicators$quote[[1]], recursive = FALSE)
   bar_start <- .POSIXct(y$timestamp[[1]], tz = "UTC")
+  exchange_tz <- y$meta$exchangeTimezoneName %||% "UTC"
 
   # Plain column names: ichimoku matches columns by name
   bars <- xts(
@@ -254,13 +258,17 @@ fetch_yahoo_daily <- function(symbol, from) {
       Close = as.numeric(quote$close), Volume = as.numeric(quote$volume),
       Adjusted = as.numeric(unlist(y$indicators$adjclose))
     ),
-    order.by = as.Date(bar_start, tz = y$meta$exchangeTimezoneName %||% "UTC")
+    order.by = as.Date(bar_start, tz = exchange_tz)
   )
 
   # Completed bars are stamped with their session start. For some open sessions
   # (futures, Sydney) Yahoo adds the live quote as a bar stamped with the last trade
   # time, which is delayed, so just after midnight that bar still has yesterday's date.
-  bars[!y$timestamp[[1]] %in% y$meta$regularMarketTime, ]
+  bars <- bars[!y$timestamp[[1]] %in% y$meta$regularMarketTime, ]
+
+  # Drop today's still-forming bar so signals only use completed bars. A bar is
+  # complete once its date has passed on the exchange's calendar.
+  bars[index(bars) < as.Date(Sys.time(), tz = exchange_tz), ]
 }
 
 download_candles <- function(symbol) {
@@ -279,9 +287,6 @@ download_candles <- function(symbol) {
 
   # Drop rows Yahoo returns without prices (volume may legitimately be missing)
   d <- d[complete.cases(d[, -5]), ]
-
-  # Drop today's still-forming bar so signals only use completed bars
-  d <- d[index(d) < as.Date(Sys.time(), tz = CONFIG$MARKET_TZ), ]
   validate(need(nrow(d) >= 2, paste("Not enough price history for", symbol)))
 
   # Adjust OHLC for splits and dividends so returns and signals aren't distorted
