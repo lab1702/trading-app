@@ -104,19 +104,24 @@ docker run -p 8001:3838 trading-app
 
 #### Dockerfile Details
 
-The application uses a single-stage Docker setup based on `rocker/shiny-verse`:
+The application uses a single-stage Docker setup based on `rocker/shiny`:
 
 ```dockerfile
-FROM rocker/shiny-verse
+FROM rocker/shiny
 
 RUN install2.r \
     --error \
     --skipinstalled \
+    ggplot2 \
+    shiny \
+    bslib \
     thematic \
     quantmod \
+    xts \
     PerformanceAnalytics \
     ichimoku \
     prophet \
+    TTR \
     patchwork \
     future \
     promises
@@ -127,20 +132,23 @@ COPY app.R /srv/shiny-server/app.R
 ```
 
 This provides:
-- Pre-configured R environment with tidyverse
-- Shiny server ready for production
-- All required financial analysis packages
+- R and Shiny Server ready for production, without the tidyverse
+- Only the packages `app.R` attaches with `library()`, plus their dependencies
+
+The install list mirrors the `library()` calls at the top of `app.R`; keep the two
+in sync. `--skipinstalled` leaves the packages the base image already ships (Shiny
+and its dependencies) untouched.
 
 **Unpinned by design.** The base image tag and R package versions are intentionally
-not pinned: every build uses the latest `rocker/shiny-verse` image and installs the
-current release of each additional package. Packages that ship in the base image
-(R, Shiny, the tidyverse) stay at the versions it provides and move forward when
-`rocker/shiny-verse` is rebuilt upstream. They are not upgraded during the build:
-littler's `update.r` can replace littler itself with a prebuilt binary whose `r`
-cannot load the image's `libR.so`, which breaks `install2.r`. The
+not pinned: every build uses the latest `rocker/shiny` image and installs the
+current release of each package it does not already have. Packages that ship in the
+base image (R, Shiny and its dependencies) stay at the versions it provides and move
+forward when `rocker/shiny` is rebuilt upstream. They are not upgraded during the
+build: littler's `update.r` can replace littler itself with a prebuilt binary whose
+`r` cannot load the image's `libR.so`, which breaks `install2.r`. The
 trade-off is that builds are not reproducible and a new upstream release can break
 a rebuild; if that happens, fix forward or temporarily pin the tag (e.g.
-`rocker/shiny-verse:4.6.1`) until it is resolved. Please don't flag the lack of
+`rocker/shiny:4.6.2`) until it is resolved. Please don't flag the lack of
 pinning in code reviews.
 
 Docker Compose also defines a healthcheck, so `docker ps` reports the container as unhealthy if Shiny Server stops accepting connections. It only opens a TCP connection to port 3838 rather than requesting the app, because each app request would start an R process that Shiny Server stops again once idle.
