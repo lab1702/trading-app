@@ -190,7 +190,7 @@ create_candlestick_chart()       # Main chart visualization
 ### 2. Navigation Tabs
 
 #### **Summary Tab**
-- **Recommendations**: a BUY, HOLD, SELL, or WAIT call for each strategy level, with the date of the last daily bar they are based on
+- **Recommendations**: a BUY, HOLD, SELL, or WAIT call for each strategy level, with the date of the last daily bar they are based on, how long the position has been held or been out, and a notice when the last bar changed the rule the call comes from
 - **Data Overview**: Structure of the downloaded OHLCV data and recent prices
 - **Company Information**: Automatic company name lookup
 
@@ -256,10 +256,23 @@ strategy statistics also trade at. For L3 the position follows the entry/exit
 logic (enter when s1 turns true, hold until s2 turns true), not just the current
 s1 condition.
 
+Under the call, the box describes the position through the last completed bar:
+the bar at whose open it was entered or exited, the number of completed bars
+since then and, for a position that is held, its return from that open to the
+last close (`In since 2026-11-16 (6 bars): -3.7%`, `Out since 2026-11-17 (5 bars)`).
+With a BUY that is the time spent out before the entry, with a SELL the trade
+that is about to be closed.
+
 Both positions are those of the combination that ranks best on the current data.
 A new bar can change which combination that is, so from one day to the next the
 call can go from WAIT to HOLD, or from HOLD to WAIT, without a BUY or SELL in
-between.
+between. To show when that happens, the app searches once more without the last
+bar. If another combination ranked best then, the box says that the rule changed
+with the last bar, and names the new rule, the rule before it and the call that
+rule gave.
+That search uses today's download without its last bar, which starts a day later
+than the download of the day before, so in rare cases it can differ from what
+the app showed then.
 
 When the second condition of an L2 combination involves the chikou span,
 `ichimoku` builds the strategy with that condition one bar later than in the
@@ -290,7 +303,7 @@ including a still-open one.
 
 ### Performance Features
 
-- **Reactive Caching**: Ichimoku, strategy, outperformance report, and Prophet results are cached across sessions, keyed on the downloaded data so they refresh when new prices arrive
+- **Reactive Caching**: Ichimoku, strategy, previous-bar rule, outperformance report, and Prophet results are cached across sessions, keyed on the downloaded data so they refresh when new prices arrive
 - **Background Forecasting**: Prophet models are fitted in background R processes (`ExtendedTask` + `future`) only when the forecast tab is open, so a slow fit doesn't block other users or the rest of the app. Successful fits are cached; failed fits are retried the next time the tab is opened or the data is refreshed
 - **Download Timeout**: a price download gives up after 15 seconds, because it holds up every session while it runs
 - **Debounced Input**: Typing a symbol waits 1 second before downloading or recomputing anything

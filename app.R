@@ -109,7 +109,7 @@ ui <- page_navbar(
         value_box(
           title = "Ichimoku Level 1 Strategy",
           value = textOutput("rec1"),
-          textOutput("note1"),
+          uiOutput("details1"),
           p("Simple (s1)"),
           theme = "primary",
           showcase = plotOutput("sc1"),
@@ -118,7 +118,7 @@ ui <- page_navbar(
         value_box(
           title = "Ichimoku Level 2 Strategy",
           value = textOutput("rec2"),
-          textOutput("note2"),
+          uiOutput("details2"),
           p("Complex (s1 & s2)"),
           theme = "primary",
           showcase = plotOutput("sc2"),
@@ -127,7 +127,7 @@ ui <- page_navbar(
         value_box(
           title = "Ichimoku Level 3 Strategy",
           value = textOutput("rec3"),
-          textOutput("note3"),
+          uiOutput("details3"),
           p("Asymmetric (s1 x s2) [Experimental]"),
           theme = "secondary",
           showcase = plotOutput("sc3"),
@@ -507,6 +507,17 @@ server <- function(input, output, session) {
     validate(need(FALSE, paste("Fitting forecast model for", symbol(), "...")))
   })
 
+  # ichimoku dates the future cloud on weekdays only unless holidays = NULL, which
+  # would misdate it for symbols that trade every day of the week (crypto)
+  build_ichimoku <- function(data, ticker) {
+    wday <- as.POSIXlt(index(data))$wday
+    if (mean(wday == 0) > 0.1 && mean(wday == 6) > 0.1) {
+      ichimoku(x = data, ticker = ticker, holidays = NULL)
+    } else {
+      ichimoku(x = data, ticker = ticker)
+    }
+  }
+
   get_ichimoku <- reactive({
     x <- get_raw_data()
     validate(need(
@@ -514,14 +525,7 @@ server <- function(input, output, session) {
       paste("Not enough price history for Ichimoku analysis of", x$ticker)
     ))
 
-    # ichimoku dates the future cloud on weekdays only unless holidays = NULL, which
-    # would misdate it for symbols that trade every day of the week (crypto)
-    wday <- as.POSIXlt(index(x$data))$wday
-    if (mean(wday == 0) > 0.1 && mean(wday == 6) > 0.1) {
-      ichimoku(x = x$data, ticker = x$ticker, holidays = NULL)
-    } else {
-      ichimoku(x = x$data, ticker = x$ticker)
-    }
+    build_ichimoku(x$data, x$ticker)
   }) |> bindCache(data_key())
 
   # Positions held on each bar, ending with the next (not yet traded) bar, as a data
@@ -676,44 +680,79 @@ server <- function(input, output, session) {
     })
   }
 
+  # The best combination of a level, or NULL when the search fails or finds none.
   # Note: the best combination is picked in-sample, on the same data it is then
   # evaluated on, so its results flatter the strategy
-  create_best_strategy <- function(level) {
-    strategy <- reactive({
-      d <- get_ichimoku()
+  find_best_strategy <- function(d, level) {
+    s <- tryCatch(
+      lapply(
+        if (level == 3) {
+          best_asymmetric(d, n = 1)
+        } else {
+          autostrat(
+            x = d,
+            n = 1,
+            level = level,
+            quietly = TRUE
+          )
+        },
+        function(s) include_open_position(align_second_condition(s, d))
+      ),
+      error = function(e) {
+        log_error(paste0("strategy L", level, " ", attr(d, "ticker")), e)
+        NULL
+      }
+    )
+    if (length(s) > 0) s[[1]]
+  }
 
-      s <- tryCatch(
-        lapply(
-          if (level == 3) {
-            best_asymmetric(d, n = 1)
-          } else {
-            autostrat(
-              x = d,
-              n = 1,
-              level = level,
-              quietly = TRUE
-            )
-          },
-          function(s) include_open_position(align_second_condition(s, d))
-        ),
-        error = function(e) {
-          log_error(paste0("strategy L", level, " ", symbol()), e)
-          NULL
-        }
-      )
+  # The combination a strategy trades, as ichimoku names it
+  strategy_rule <- function(s) {
+    attr(s, "strat")["Strategy", ][[1]]
+  }
+
+  create_best_strategy <- function(level) {
+    reactive({
+      s <- find_best_strategy(get_ichimoku(), level)
       validate(need(
-        length(s) > 0,
+        !is.null(s),
         if (nrow(get_raw_data()$data) < CONFIG$MIN_RELIABLE_STRATEGY_ROWS) {
           paste0("Not enough price history for the L", level, " strategy of ", symbol())
         } else {
           paste0("Strategy L", level, " unavailable for ", symbol())
         }
       ))
-      s[[1]]
+      s
     }) |> bindCache(data_key(), level)
   }
 
   best_strategy <- lapply(1:3, create_best_strategy)
+
+  # The combination that ranked best before the last bar arrived, and the call it
+  # gave then. When the last bar changes the combination, the call comes from
+  # another rule than the call one bar earlier and need not follow from it (WAIT
+  # can turn into HOLD without a BUY). Found by searching again without the last
+  # bar. NULL when that leaves too little history or finds no combination.
+  create_previous_rule <- function(level) {
+    reactive({
+      x <- get_raw_data()
+      bars <- nrow(x$data) - 1
+      if (bars < CONFIG$MIN_ICHIMOKU_ROWS) {
+        return(NULL)
+      }
+
+      s <- tryCatch(
+        find_best_strategy(build_ichimoku(x$data[seq_len(bars), ], x$ticker), level),
+        error = function(e) {
+          log_error(paste0("previous rule L", level, " ", x$ticker), e)
+          NULL
+        }
+      )
+      if (!is.null(s)) list(rule = strategy_rule(s), call = position_call(replay_positions(s)$posn))
+    }) |> bindCache(data_key(), level, "previous")
+  }
+
+  previous_rule <- lapply(1:3, create_previous_rule)
 
   # Helper function to create ggplot candlestick chart; colors and fonts come from thematic
   create_candlestick_chart <- function(stock_data, ticker) {
@@ -859,25 +898,79 @@ server <- function(input, output, session) {
     WAIT = "Already out: stay out"
   )
 
-  # One call per level, shared by the recommendation and its note
+  # The position through the last completed bar, in words: the bar at whose open
+  # it was entered or exited, the completed bars since then and, for a position
+  # that is held, its return from that open to the last close. NULL when there is
+  # no completed bar. Like in the call, a position that isn't defined yet counts
+  # as none.
+  position_age <- function(s) {
+    p <- replay_positions(s)
+    last <- nrow(p) - 1
+    if (last < 1) {
+      return(NULL)
+    }
+
+    held <- !is.na(p$posn[seq_len(last)]) & p$posn[seq_len(last)] == 1
+    other <- which(held != held[last])
+    if (length(other) == 0) {
+      return("No position so far")
+    }
+    start <- max(other) + 1
+    bars <- last - start + 1
+    span <- sprintf(
+      "since %s (%d %s)",
+      format(as.Date(p$index[start])), bars, if (bars == 1) "bar" else "bars"
+    )
+    if (!held[last]) {
+      return(paste("Out", span))
+    }
+
+    core <- coredata(s)
+    sprintf("In %s: %+.1f%%", span, 100 * (core[last, "close"] / core[start, "open"] - 1))
+  }
+
+  # One call per level, shared by the recommendation and the lines under it
   create_call <- function(level) {
-    reactive(position_call(replay_positions(best_strategy[[level]]())$posn))
+    reactive({
+      s <- best_strategy[[level]]()
+      list(
+        call = position_call(replay_positions(s)$posn),
+        age = position_age(s),
+        rule = strategy_rule(s)
+      )
+    })
   }
 
   calls <- lapply(1:3, create_call)
 
   # Factory function for recommendations
   create_recommendation <- function(level) {
-    renderText(calls[[level]]())
+    renderText(calls[[level]]()$call)
   }
 
-  # Factory function for the meaning of a recommendation. Left empty on a
-  # validation message, which the recommendation above it already shows.
-  create_call_note <- function(level) {
-    renderText({
-      state <- tryCatch(calls[[level]](), error = function(e) NULL)
-      req(state %in% names(call_notes))
-      call_notes[[state]]
+  # Factory function for the lines under a recommendation: what it means, the
+  # position up to it, and a notice when the last bar changed the combination.
+  # Left empty on a validation message, which the recommendation above them
+  # already shows.
+  create_call_details <- function(level) {
+    renderUI({
+      now <- tryCatch(calls[[level]](), error = function(e) NULL)
+      req(now$call %in% names(call_notes))
+      before <- previous_rule[[level]]()
+
+      div(
+        class = "mb-2",
+        div(call_notes[[now$call]]),
+        div(now$age),
+        if (!is.null(before) && before$rule != now$rule) {
+          div(
+            class = "mt-2 fst-italic",
+            div("Rule changed with the last bar"),
+            div(paste("Now:", now$rule)),
+            div(paste0("Before: ", before$rule, ", which called ", before$call))
+          )
+        }
+      )
     })
   }
 
@@ -885,9 +978,9 @@ server <- function(input, output, session) {
   output$rec2 <- create_recommendation(2)
   output$rec3 <- create_recommendation(3)
 
-  output$note1 <- create_call_note(1)
-  output$note2 <- create_call_note(2)
-  output$note3 <- create_call_note(3)
+  output$details1 <- create_call_details(1)
+  output$details2 <- create_call_details(2)
+  output$details3 <- create_call_details(3)
 
   # The bar the recommendations are based on. Left empty on a validation message,
   # which each recommendation below it already shows.
