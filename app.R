@@ -27,10 +27,14 @@ utils::globalVariables(c(
 # Configuration constants
 CONFIG <- list(
   DATA_HISTORY_YEARS = 5,
+  # An open session downloads its symbol again this often, to pick up new bars
+  DATA_REFRESH_MINUTES = 30,
+  # A download blocks every session while it runs, so it gives up after this long
+  DOWNLOAD_TIMEOUT_SECS = 15,
   PROPHET_FORECAST_DAYS = 90, # calendar days; weekends are dropped from the forecast
   SYMBOL_MAX_LENGTH = 20,
-  STRATEGY_LEVELS = c(1, 2, 3),
-  STRATEGY_N = 1,
+  # A failed download of the company name list is tried again after this long
+  SYMBOL_LIST_RETRY_MINUTES = 10,
   # ichimoku() can segfault on shorter series, and autostrat() fails on every level
   # below 52 + 2 * 26 periods (the cloud plus comparisons with the lagged chikou)
   MIN_ICHIMOKU_ROWS = 104,
@@ -43,18 +47,32 @@ CONFIG <- list(
 # Completed Prophet fits, shared by all sessions in this R process
 prophet_cache <- cachem::cache_mem(max_size = 200 * 1024^2)
 
-# Prophet fits run in background R processes so one slow fit doesn't block
-# every other session sharing this R process
+# Prophet fits and the download of the symbol list run in background R processes,
+# so a slow one doesn't block every session sharing this R process
 plan(multisession, workers = CONFIG$PROPHET_WORKERS)
 
-stock_syms <- tryCatch(
-  {
-    stockSymbols()
-  },
-  error = function(e) {
-    data.frame(Symbol = character(0), Name = character(0))
-  }
-)
+# Log the full error server-side; users only see the friendly validate() message
+log_error <- function(context, e) {
+  message(sprintf("[%s] %s: %s", format(Sys.time()), context, conditionMessage(e)))
+}
+
+# NASDAQ's symbol list, for company names; NULL until it has arrived. It is
+# downloaded in a background process, so neither startup nor a session waits on
+# NASDAQ's FTP server, and a failed download is tried again. As a reactive value
+# shared by all sessions, it makes the names appear once the list is in.
+stock_syms <- reactiveVal(NULL)
+load_stock_syms <- function() {
+  future_promise(TTR::stockSymbols(quiet = TRUE)) |>
+    then(
+      onFulfilled = function(syms) stock_syms(syms),
+      onRejected = function(e) {
+        log_error("symbol list", e)
+        later::later(load_stock_syms, CONFIG$SYMBOL_LIST_RETRY_MINUTES * 60)
+      }
+    )
+  invisible()
+}
+load_stock_syms()
 
 # Configure thematic for automatic ggplot2 theming
 thematic_on(font = font_spec(scale = 1.5))
@@ -86,6 +104,7 @@ ui <- page_navbar(
     card(
       fill = FALSE,
       card_title("Recommendations"),
+      textOutput("as_of"),
       layout_columns(
         value_box(
           title = "Ichimoku Level 1 Strategy",
@@ -224,23 +243,19 @@ ui <- page_navbar(
 )
 
 
-# Log the full error server-side; users only see the friendly validate() message
-log_error <- function(context, e) {
-  message(sprintf("[%s] %s: %s", format(Sys.time()), context, conditionMessage(e)))
-}
-
-# Completed daily bars from Yahoo's chart API, dated by the exchange's own calendar;
-# NULL for an unknown symbol. quantmod::getSymbols() isn't used because it dates
-# each bar by the UTC date of its start, which is the previous day wherever the
-# trading day starts before midnight UTC (currencies during UK summer time, Sydney,
-# Auckland). A still-forming bar could then pass as a completed bar of the day before.
+# Completed daily bars from Yahoo's chart API, dated by the exchange's own calendar,
+# and the dividends paid over them; NULL for an unknown symbol. quantmod::getSymbols()
+# isn't used because it dates each bar by the UTC date of its start, which is the
+# previous day wherever the trading day starts before midnight UTC (currencies during
+# UK summer time, Sydney, Auckland). A still-forming bar could then pass as a
+# completed bar of the day before.
 fetch_yahoo_daily <- function(symbol, from) {
   url <- sprintf(
-    "https://query2.finance.yahoo.com/v8/finance/chart/%s?period1=%.0f&period2=%.0f&interval=1d",
+    "https://query2.finance.yahoo.com/v8/finance/chart/%s?period1=%.0f&period2=%.0f&interval=1d&events=div",
     utils::URLencode(symbol, reserved = TRUE),
     as.numeric(as.POSIXct(from, tz = "UTC")), as.numeric(Sys.time())
   )
-  res <- curl::curl_fetch_memory(url)
+  res <- curl::curl_fetch_memory(url, handle = curl::new_handle(timeout = CONFIG$DOWNLOAD_TIMEOUT_SECS))
   if (res$status_code == 404) {
     return(NULL)
   }
@@ -248,17 +263,16 @@ fetch_yahoo_daily <- function(symbol, from) {
 
   y <- jsonlite::fromJSON(rawToChar(res$content))$chart$result
   quote <- unlist(y$indicators$quote[[1]], recursive = FALSE)
-  bar_start <- .POSIXct(y$timestamp[[1]], tz = "UTC")
   exchange_tz <- y$meta$exchangeTimezoneName %||% "UTC"
+  exchange_date <- function(time) as.Date(.POSIXct(time, tz = "UTC"), tz = exchange_tz)
 
   # Plain column names: ichimoku matches columns by name
   bars <- xts(
     cbind(
       Open = as.numeric(quote$open), High = as.numeric(quote$high), Low = as.numeric(quote$low),
-      Close = as.numeric(quote$close), Volume = as.numeric(quote$volume),
-      Adjusted = as.numeric(unlist(y$indicators$adjclose))
+      Close = as.numeric(quote$close), Volume = as.numeric(quote$volume)
     ),
-    order.by = as.Date(bar_start, tz = exchange_tz)
+    order.by = exchange_date(y$timestamp[[1]])
   )
 
   # Completed bars are stamped with their session start. For some open sessions
@@ -268,13 +282,56 @@ fetch_yahoo_daily <- function(symbol, from) {
 
   # Drop today's still-forming bar so signals only use completed bars. A bar is
   # complete once its date has passed on the exchange's calendar.
-  bars[index(bars) < as.Date(Sys.time(), tz = exchange_tz), ]
+  bars <- bars[index(bars) < as.Date(Sys.time(), tz = exchange_tz), ]
+
+  # Dividends by ex-dividend date, in a fixed order: the adjustment multiplies their
+  # factors together, and its result must not depend on the order Yahoo lists them in
+  events <- y$events$dividends
+  dividends <- data.frame(
+    date = exchange_date(vapply(events, function(e) as.numeric(e$date), numeric(1), USE.NAMES = FALSE)),
+    amount = vapply(events, function(e) as.numeric(e$amount), numeric(1), USE.NAMES = FALSE)
+  )
+
+  list(bars = bars, dividends = dividends[order(dividends$date, dividends$amount), ])
+}
+
+# Back-adjust OHLC for dividends, so returns and signals aren't distorted by the
+# drop in price on each ex-dividend date: every bar before one is scaled by
+# 1 - dividend / previous close. Yahoo's prices are already adjusted for splits.
+#
+# The signals must come out the same from one download to the next. With Yahoo's own
+# adjusted close they didn't: it has different rounding noise on every request, and
+# that noise decided at random the bars where two Ichimoku lines are exactly equal
+# (the lines are means of prices in whole cents, so such bars aren't rare). The
+# dividends are the same on every request, except those declared in another currency
+# (Vodafone in London), which Yahoo converts at the exchange rate of the moment. So
+# the ratio is also rounded to 24 bits, as many as Yahoo's prices have: the scaled
+# prices and the lines averaged from them are then exact, and lines that are equal
+# in the unadjusted prices stay equal whatever the ratio is.
+adjust_for_dividends <- function(bars, dividends) {
+  dates <- index(bars)
+  close <- as.numeric(bars[, "Close"])
+  ratio <- rep(1, nrow(bars))
+
+  for (i in seq_len(nrow(dividends))) {
+    before <- dates < dividends$date[i]
+    if (!any(before)) next
+
+    # Ignore bad data: a dividend that isn't smaller than the price it is paid on
+    factor <- 1 - dividends$amount[i] / close[sum(before)]
+    if (is.finite(factor) && factor > 0 && factor <= 1) ratio[before] <- ratio[before] * factor
+  }
+  ratio <- round(ratio * 2^24) / 2^24
+
+  prices <- c("Open", "High", "Low", "Close")
+  bars[, prices] <- coredata(bars[, prices]) * ratio
+  bars
 }
 
 download_candles <- function(symbol) {
   from <- seq(Sys.Date(), length.out = 2, by = paste0("-", CONFIG$DATA_HISTORY_YEARS, " years"))[2]
 
-  d <- tryCatch(
+  x <- tryCatch(
     fetch_yahoo_daily(symbol, from),
     error = function(e) {
       log_error(paste("download", symbol), e)
@@ -282,15 +339,14 @@ download_candles <- function(symbol) {
     }
   )
 
-  validate(need(!inherits(d, "error"), paste("Could not download data for", symbol, "- try again later")))
-  validate(need(!is.null(d), paste("No data found for", symbol, "- check the spelling")))
+  validate(need(!inherits(x, "error"), paste("Could not download data for", symbol, "- try again later")))
+  validate(need(!is.null(x), paste("No data found for", symbol, "- check the spelling")))
 
   # Drop rows Yahoo returns without prices (volume may legitimately be missing)
-  d <- d[complete.cases(d[, -5]), ]
+  d <- x$bars[complete.cases(x$bars[, -5]), ]
   validate(need(nrow(d) >= 2, paste("Not enough price history for", symbol)))
 
-  # Adjust OHLC for splits and dividends so returns and signals aren't distorted
-  adjustOHLC(d, use.Adjusted = TRUE)
+  adjust_for_dividends(d, x$dividends)
 }
 
 # Base plots need an explicit message; ggplot/validate outputs show it automatically
@@ -309,6 +365,9 @@ server <- function(input, output, session) {
     toupper(trimws(stock_debounced() %||% ""))
   })
 
+  # The last successful download, which stays on screen if a later refresh fails
+  last_download <- NULL
+
   get_raw_data <- reactive({
     sym <- symbol()
     validate(need(nzchar(sym), "Enter a stock symbol"))
@@ -321,7 +380,19 @@ server <- function(input, output, session) {
       paste("Symbol too long. Use at most", CONFIG$SYMBOL_MAX_LENGTH, "characters.")
     ))
 
-    list(data = download_candles(sym), ticker = sym)
+    # Download again later, so a session that is left open picks up new bars
+    # instead of showing the recommendation of the day the symbol was typed
+    invalidateLater(CONFIG$DATA_REFRESH_MINUTES * 60 * 1000)
+
+    x <- tryCatch(
+      list(data = download_candles(sym), ticker = sym),
+      error = function(e) {
+        if (!identical(last_download$ticker, sym)) stop(e)
+        last_download
+      }
+    )
+    last_download <<- x
+    x
   })
 
   # Cache key tied to the downloaded data, so cached results refresh when new bars
@@ -333,13 +404,14 @@ server <- function(input, output, session) {
 
   get_company_name <- reactive({
     d <- get_raw_data()
+    syms <- stock_syms()
 
-    if (nrow(stock_syms) == 0) {
+    if (is.null(syms)) {
       return(paste("Company name unavailable for", d$ticker))
     }
 
     # A symbol can be listed on several exchanges; take the first name
-    company_name <- stock_syms$Name[toupper(stock_syms$Symbol) == d$ticker]
+    company_name <- syms$Name[toupper(syms$Symbol) == d$ticker]
     company_name <- company_name[!is.na(company_name)][1]
 
     if (is.na(company_name)) {
@@ -395,7 +467,8 @@ server <- function(input, output, session) {
   prophet_task_key <- reactiveVal(NULL)
 
   # Start a fit when the forecast tab is open and the result isn't cached. A key
-  # whose fit failed is retried the next time the tab is opened.
+  # whose fit failed is retried the next time the tab is opened or the data is
+  # downloaded again.
   observe({
     req(input$nav == "Prophet Forecast")
     key <- prophet_key()
@@ -609,11 +682,11 @@ server <- function(input, output, session) {
       s <- tryCatch(
         lapply(
           if (level == 3) {
-            best_asymmetric(d, n = CONFIG$STRATEGY_N)
+            best_asymmetric(d, n = 1)
           } else {
             autostrat(
               x = d,
-              n = CONFIG$STRATEGY_N,
+              n = 1,
               level = level,
               quietly = TRUE
             )
@@ -637,7 +710,7 @@ server <- function(input, output, session) {
     }) |> bindCache(data_key(), level)
   }
 
-  best_strategy <- lapply(CONFIG$STRATEGY_LEVELS, create_best_strategy)
+  best_strategy <- lapply(1:3, create_best_strategy)
 
   # Helper function to create ggplot candlestick chart; colors and fonts come from thematic
   create_candlestick_chart <- function(stock_data, ticker) {
@@ -683,15 +756,18 @@ server <- function(input, output, session) {
 
     no_x_title <- theme(axis.title.x = element_blank())
 
+    # na.rm on the indicators: each one starts with empty bars, and the warning
+    # ggplot2 gives about them on every render would bury real errors in the log
+
     # Main candlestick chart
     p1 <- ggplot(df, aes(x = Date)) +
       # Bollinger Bands
       geom_ribbon(aes(ymin = BB_lower, ymax = BB_upper),
-        alpha = 0.1, fill = "blue"
+        alpha = 0.1, fill = "blue", na.rm = TRUE
       ) +
-      geom_line(aes(y = BB_upper), color = "blue", alpha = 0.6, linewidth = 0.5) +
-      geom_line(aes(y = BB_lower), color = "blue", alpha = 0.6, linewidth = 0.5) +
-      geom_line(aes(y = BB_mavg), color = "blue", alpha = 0.8, linewidth = 0.7) +
+      geom_line(aes(y = BB_upper), color = "blue", alpha = 0.6, linewidth = 0.5, na.rm = TRUE) +
+      geom_line(aes(y = BB_lower), color = "blue", alpha = 0.6, linewidth = 0.5, na.rm = TRUE) +
+      geom_line(aes(y = BB_mavg), color = "blue", alpha = 0.8, linewidth = 0.7, na.rm = TRUE) +
 
       # Candlesticks - wicks
       geom_segment(aes(x = Date, xend = Date, y = Low, yend = High),
@@ -706,8 +782,8 @@ server <- function(input, output, session) {
       ) +
 
       # Moving averages
-      geom_line(aes(y = SMA20), color = "orange", linewidth = 0.8, alpha = 0.8) +
-      geom_line(aes(y = SMA50), color = "purple", linewidth = 0.8, alpha = 0.8) +
+      geom_line(aes(y = SMA20), color = "orange", linewidth = 0.8, alpha = 0.8, na.rm = TRUE) +
+      geom_line(aes(y = SMA50), color = "purple", linewidth = 0.8, alpha = 0.8, na.rm = TRUE) +
       labs(
         title = paste(ticker, "- Candlestick Chart with Technical Indicators"),
         y = "Price"
@@ -719,14 +795,14 @@ server <- function(input, output, session) {
     p2 <- ggplot(df, aes(x = Date)) +
       geom_col(aes(y = Volume),
         fill = candle_color,
-        alpha = 0.7, width = 0.8
+        alpha = 0.7, width = 0.8, na.rm = TRUE
       ) +
       labs(y = "Volume") +
       no_x_title
 
     # RSI subplot
     p3 <- ggplot(df, aes(x = Date)) +
-      geom_line(aes(y = RSI), color = "cyan", linewidth = 0.8) +
+      geom_line(aes(y = RSI), color = "cyan", linewidth = 0.8, na.rm = TRUE) +
       geom_hline(yintercept = 70, color = "red", linetype = "dashed", alpha = 0.7) +
       geom_hline(yintercept = 30, color = "green", linetype = "dashed", alpha = 0.7) +
       geom_hline(yintercept = 50, linetype = "dotted", alpha = 0.5) +
@@ -736,8 +812,8 @@ server <- function(input, output, session) {
 
     # MACD subplot
     p4 <- ggplot(df, aes(x = Date)) +
-      geom_line(aes(y = MACD), color = "blue", linewidth = 0.8) +
-      geom_line(aes(y = MACD_signal), color = "red", linewidth = 0.8) +
+      geom_line(aes(y = MACD), color = "blue", linewidth = 0.8, na.rm = TRUE) +
+      geom_line(aes(y = MACD_signal), color = "red", linewidth = 0.8, na.rm = TRUE) +
       geom_hline(yintercept = 0, linetype = "dotted", alpha = 0.5) +
       labs(y = "MACD", x = "Date")
 
@@ -774,6 +850,14 @@ server <- function(input, output, session) {
   output$rec2 <- create_recommendation(2)
   output$rec3 <- create_recommendation(3)
 
+  # The bar the recommendations are based on. Left empty on a validation message,
+  # which each recommendation below it already shows.
+  output$as_of <- renderText({
+    x <- tryCatch(get_raw_data(), error = function(e) NULL)
+    req(x)
+    paste("Based on completed daily bars through", format(end(x$data)))
+  })
+
   output$loaded <- renderPrint({
     str(get_raw_data()$data)
   })
@@ -798,9 +882,10 @@ server <- function(input, output, session) {
   # condition, which differs from the position for level 3)
   create_showcase_plot <- function(level) {
     renderPlot({
+      # na.rm: there is no position on the bars before the conditions are defined
       replay_positions(best_strategy[[level]]()) |>
         ggplot(aes(x = index, y = posn)) +
-        geom_line() +
+        geom_line(na.rm = TRUE) +
         theme(
           axis.title = element_blank(),
           axis.text.y = element_blank()
@@ -847,7 +932,7 @@ server <- function(input, output, session) {
           p_dd <- chart.Drawdown(r, main = "Drawdown", ylab = "Drawdown", plot.engine = "ggplot2")
 
           print(p_cum / p_dd +
-            plot_annotation(title = paste("L", level, "Performance", attributes(d)$ticker)))
+            plot_annotation(title = paste0("L", level, " Performance ", attributes(d)$ticker)))
         },
         error = function(e) {
           log_error(paste0("performance L", level, " ", symbol()), e)
@@ -871,20 +956,27 @@ server <- function(input, output, session) {
     })
   }
 
-  # Factory function for outperformance tables
+  # Factory function for outperformance tables. table.ProbOutPerformance() takes
+  # seconds, during which no session gets a response, so its result is cached
+  # across sessions like the strategy it is computed from.
   create_outperformance <- function(level) {
-    renderTable(
-      {
-        d <- best_strategy[[level]]()
+    report <- reactive({
+      d <- best_strategy[[level]]()
 
-        # Only bars that have returns: the strategy also carries the future cloud
-        # dates and the bars before its conditions are defined, and the table would
-        # count the shortened windows around them as full periods
-        r <- na.omit(d[, c("sret", "ret")])
-        table.ProbOutPerformance(r$sret, r$ret)
-      },
-      striped = TRUE
-    )
+      # Only bars that have returns: the strategy also carries the future cloud
+      # dates and the bars before its conditions are defined, and the table would
+      # count the shortened windows around them as full periods
+      r <- na.omit(d[, c("sret", "ret")])
+      tab <- table.ProbOutPerformance(r$sret, r$ret)
+
+      # The period lengths and counts are whole numbers; as doubles renderTable
+      # would show them with two decimals
+      counts <- 1:4
+      tab[counts] <- lapply(tab[counts], as.integer)
+      tab
+    }) |> bindCache(data_key(), level)
+
+    renderTable(report(), striped = TRUE)
   }
 
   output$summary1 <- create_summary(1)

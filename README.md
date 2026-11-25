@@ -163,10 +163,11 @@ trading-app/
 # Configuration Management
 CONFIG <- list(
   DATA_HISTORY_YEARS = 5,
+  DATA_REFRESH_MINUTES = 30,
+  DOWNLOAD_TIMEOUT_SECS = 15,
   PROPHET_FORECAST_DAYS = 90,
   SYMBOL_MAX_LENGTH = 20,
-  STRATEGY_LEVELS = c(1, 2, 3),
-  STRATEGY_N = 1,
+  SYMBOL_LIST_RETRY_MINUTES = 10,
   MIN_ICHIMOKU_ROWS = 104,
   MIN_RELIABLE_STRATEGY_ROWS = 130,
   PROPHET_WORKERS = 2
@@ -189,8 +190,8 @@ create_candlestick_chart()       # Main chart visualization
 ### 2. Navigation Tabs
 
 #### **Summary Tab**
-- **Recommendations**: Buy/Hold/Sell signals for all strategy levels
-- **Data Overview**: Raw OHLCV data structure and recent prices
+- **Recommendations**: Buy/Hold/Sell signals for all strategy levels, with the date of the last daily bar they are based on
+- **Data Overview**: Structure of the downloaded OHLCV data and recent prices
 - **Company Information**: Automatic company name lookup
 
 #### **Analysis Charts Tab**
@@ -218,9 +219,11 @@ create_candlestick_chart()       # Main chart visualization
 
 ### Data Sources
 - **Stock Data**: Yahoo Finance chart API, last 5 years, adjusted for splits and dividends. Each daily bar is dated by its exchange's local calendar
+- **Dividend Adjustment**: the app adjusts the prices itself, from the dividends Yahoo lists, by scaling every bar before an ex-dividend date by `1 - dividend / previous close`. Yahoo's own adjusted close is not used: it differs slightly on every request, which made the same symbol give different strategies from one download to the next. For a few symbols the app's adjusted prices differ from Yahoo's (London listings, where Yahoo's adjusted close barely reflects the dividends)
+- **Automatic Refresh**: an open session downloads its symbol again every 30 minutes, so the recommendation follows new bars. If such a refresh fails, the data already shown stays
 - **Completed Bars Only**: today's still-forming bar (by the exchange's local date) is dropped, along with the live quote bar Yahoo adds for a session that is still open, so signals don't flip intraday. A day's bar is used from the next calendar day on the exchange's calendar, once Yahoo has published its closing price (for some markets that takes hours after the close)
 - **Minimum History**: Ichimoku strategies need at least 104 daily bars; newer listings show a "not enough history" message. Up to about 130 bars a strategy level may find no combination with any trades, which also shows a "not enough history" message
-- **Company Information**: NASDAQ symbol database
+- **Company Information**: NASDAQ symbol database, downloaded in the background when the app starts (names show as unavailable until it has arrived; a failed download is retried every 10 minutes)
 - **Technical Indicators**: Calculated using `TTR` package
 
 ### Ichimoku Strategy Levels
@@ -271,8 +274,9 @@ including a still-open one.
 
 ### Performance Features
 
-- **Reactive Caching**: Ichimoku, strategy, and Prophet results are cached across sessions, keyed on the downloaded data so they refresh when new prices arrive
-- **Background Forecasting**: Prophet models are fitted in background R processes (`ExtendedTask` + `future`) only when the forecast tab is open, so a slow fit doesn't block other users or the rest of the app. Successful fits are cached; failed fits are retried the next time the tab is opened
+- **Reactive Caching**: Ichimoku, strategy, outperformance report, and Prophet results are cached across sessions, keyed on the downloaded data so they refresh when new prices arrive
+- **Background Forecasting**: Prophet models are fitted in background R processes (`ExtendedTask` + `future`) only when the forecast tab is open, so a slow fit doesn't block other users or the rest of the app. Successful fits are cached; failed fits are retried the next time the tab is opened or the data is refreshed
+- **Download Timeout**: a price download gives up after 15 seconds, because it holds up every session while it runs
 - **Debounced Input**: Typing a symbol waits 1 second before downloading or recomputing anything
 - **Error Handling**: Failures show a short message in the affected output; full error details are logged server-side
 
@@ -285,13 +289,14 @@ The app has no environment-variable configuration. Edit the `CONFIG` object in `
 ```r
 CONFIG <- list(
   DATA_HISTORY_YEARS = 3,             # Years of price history to download
+  DATA_REFRESH_MINUTES = 15,          # How often an open session downloads its symbol again
+  DOWNLOAD_TIMEOUT_SECS = 15,         # Give up on a price download after this long
   PROPHET_FORECAST_DAYS = 60,         # Forecast horizon in calendar days
   SYMBOL_MAX_LENGTH = 30,             # Allow longer symbols
-  STRATEGY_LEVELS = c(1, 2, 3),
-  STRATEGY_N = 1,
+  SYMBOL_LIST_RETRY_MINUTES = 10,     # Wait before retrying a failed company name download
   MIN_ICHIMOKU_ROWS = 104,            # Minimum daily bars for Ichimoku analysis
   MIN_RELIABLE_STRATEGY_ROWS = 130,   # Below this, a failed strategy search means short history
-  PROPHET_WORKERS = 2                 # Background processes for Prophet fits
+  PROPHET_WORKERS = 2                 # Background processes (Prophet fits, company name download)
 )
 ```
 
