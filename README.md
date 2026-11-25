@@ -109,8 +109,6 @@ The application uses a single-stage Docker setup based on `rocker/shiny-verse`:
 ```dockerfile
 FROM rocker/shiny-verse
 
-RUN /usr/local/lib/R/site-library/littler/examples/update.r
-
 RUN install2.r \
     --error \
     --skipinstalled \
@@ -134,9 +132,12 @@ This provides:
 - All required financial analysis packages
 
 **Unpinned by design.** The base image tag and R package versions are intentionally
-not pinned: every build uses the latest `rocker/shiny-verse` image and upgrades all
-packages to current CRAN releases (`update.r`). This keeps the app on the latest
-versions of R, Shiny, and the analysis packages without manual version bumps. The
+not pinned: every build uses the latest `rocker/shiny-verse` image and installs the
+current release of each additional package. Packages that ship in the base image
+(R, Shiny, the tidyverse) stay at the versions it provides and move forward when
+`rocker/shiny-verse` is rebuilt upstream. They are not upgraded during the build:
+littler's `update.r` can replace littler itself with a prebuilt binary whose `r`
+cannot load the image's `libR.so`, which breaks `install2.r`. The
 trade-off is that builds are not reproducible and a new upstream release can break
 a rebuild; if that happens, fix forward or temporarily pin the tag (e.g.
 `rocker/shiny-verse:4.6.1`) until it is resolved. Please don't flag the lack of

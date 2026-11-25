@@ -1,9 +1,8 @@
-# Deliberately unpinned: the image and all R packages track the latest releases
-# on every build. Builds are not reproducible by design; see "Dockerfile Details"
-# in README.md.
+# Deliberately unpinned: every build uses the latest rocker/shiny-verse image and
+# installs the current release of each extra package below. Packages that ship
+# in the base image stay at the versions it provides. Builds are not reproducible
+# by design; see "Dockerfile Details" in README.md.
 FROM rocker/shiny-verse
-
-RUN /usr/local/lib/R/site-library/littler/examples/update.r
 
 RUN install2.r \
     --error \
