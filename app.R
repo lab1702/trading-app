@@ -109,6 +109,7 @@ ui <- page_navbar(
         value_box(
           title = "Ichimoku Level 1 Strategy",
           value = textOutput("rec1"),
+          textOutput("note1"),
           p("Simple (s1)"),
           theme = "primary",
           showcase = plotOutput("sc1"),
@@ -117,6 +118,7 @@ ui <- page_navbar(
         value_box(
           title = "Ichimoku Level 2 Strategy",
           value = textOutput("rec2"),
+          textOutput("note2"),
           p("Complex (s1 & s2)"),
           theme = "primary",
           showcase = plotOutput("sc2"),
@@ -125,6 +127,7 @@ ui <- page_navbar(
         value_box(
           title = "Ichimoku Level 3 Strategy",
           value = textOutput("rec3"),
+          textOutput("note3"),
           p("Asymmetric (s1 x s2) [Experimental]"),
           theme = "secondary",
           showcase = plotOutput("sc3"),
@@ -832,23 +835,59 @@ server <- function(input, output, session) {
     get_company_name()
   })
 
-  # Factory function for recommendation logic
+  # The call for the next bar: the position that follows from the last completed
+  # bar, against the position held on that bar. Positions change at the open, so
+  # BUY and SELL are trades at the next open, and HOLD and WAIT are no trade. A
+  # position that isn't defined yet on the last bar counts as none, like in strat().
+  position_call <- function(posn) {
+    n <- length(posn)
+    if (n == 0 || is.na(posn[n])) {
+      return("NO DATA")
+    }
+    was_in <- n > 1 && isTRUE(posn[n - 1] == 1)
+    if (posn[n] == 1) {
+      if (was_in) "HOLD" else "BUY"
+    } else {
+      if (was_in) "SELL" else "WAIT"
+    }
+  }
+
+  call_notes <- c(
+    BUY = "New signal: enter at the next open",
+    HOLD = "Already in: stay in",
+    SELL = "New signal: exit at the next open",
+    WAIT = "Already out: stay out"
+  )
+
+  # One call per level, shared by the recommendation and its note
+  create_call <- function(level) {
+    reactive(position_call(replay_positions(best_strategy[[level]]())$posn))
+  }
+
+  calls <- lapply(1:3, create_call)
+
+  # Factory function for recommendations
   create_recommendation <- function(level) {
+    renderText(calls[[level]]())
+  }
+
+  # Factory function for the meaning of a recommendation. Left empty on a
+  # validation message, which the recommendation above it already shows.
+  create_call_note <- function(level) {
     renderText({
-      position <- tail(replay_positions(best_strategy[[level]]())$posn, 1)
-      if (length(position) == 0 || is.na(position)) {
-        "NO DATA"
-      } else if (position == 1) {
-        "BUY / HOLD"
-      } else {
-        "SELL / WAIT"
-      }
+      state <- tryCatch(calls[[level]](), error = function(e) NULL)
+      req(state %in% names(call_notes))
+      call_notes[[state]]
     })
   }
 
   output$rec1 <- create_recommendation(1)
   output$rec2 <- create_recommendation(2)
   output$rec3 <- create_recommendation(3)
+
+  output$note1 <- create_call_note(1)
+  output$note2 <- create_call_note(2)
+  output$note3 <- create_call_note(3)
 
   # The bar the recommendations are based on. Left empty on a validation message,
   # which each recommendation below it already shows.

@@ -190,7 +190,7 @@ create_candlestick_chart()       # Main chart visualization
 ### 2. Navigation Tabs
 
 #### **Summary Tab**
-- **Recommendations**: Buy/Hold/Sell signals for all strategy levels, with the date of the last daily bar they are based on
+- **Recommendations**: a BUY, HOLD, SELL, or WAIT call for each strategy level, with the date of the last daily bar they are based on
 - **Data Overview**: Structure of the downloaded OHLCV data and recent prices
 - **Company Information**: Automatic company name lookup
 
@@ -241,9 +241,25 @@ are defined.
 | L2 | Complex | s1 & s2 (two conditions combined) | Intermediate |
 | L3 | Asymmetric | s1 × s2 (separate entry and exit conditions) | Advanced |
 
-The BUY / HOLD or SELL / WAIT recommendation is the position the strategy holds
-for the next bar. For L3 this follows the entry/exit logic (enter when s1 turns
-true, hold until s2 turns true), not just the current s1 condition.
+The recommendation compares the position the strategy holds for the next bar
+with the one it held on the last completed bar:
+
+| Call | Last bar | Next bar | Meaning |
+|------|----------|----------|---------|
+| BUY | out | in | New signal: enter at the next open |
+| HOLD | in | in | Already in: stay in |
+| SELL | in | out | New signal: exit at the next open |
+| WAIT | out | out | Already out: stay out |
+
+The next open is the open of the bar after the last completed one, the price the
+strategy statistics also trade at. For L3 the position follows the entry/exit
+logic (enter when s1 turns true, hold until s2 turns true), not just the current
+s1 condition.
+
+Both positions are those of the combination that ranks best on the current data.
+A new bar can change which combination that is, so from one day to the next the
+call can go from WAIT to HOLD, or from HOLD to WAIT, without a BUY or SELL in
+between.
 
 When the second condition of an L2 combination involves the chikou span,
 `ichimoku` builds the strategy with that condition one bar later than in the
