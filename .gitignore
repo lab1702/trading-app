@@ -68,6 +68,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Claude Code local config
+.claude/
+
 # Environment variables
 .env
 .env.local
